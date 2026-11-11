@@ -46,7 +46,21 @@ ctest --test-dir build
 ./build/ig-train --pure-int --grad-stats --gscale 8192 --steps 500
 ./build/ig-pretty < stream.bin       # control bytes -> ⟪CALL⟫ … markup
 ./build/ig-pretty -r < markup.txt    # and back
-python3 tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin
+uv run tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin
+```
+
+## Data (never committed — see docs/DATA.md)
+
+Starter corpus **corpus-v0** built from local sources (2.7 GB Wikipedia-2017
+definitions + 38 GB Project Gutenberg mirror + local en/de TextCorpus):
+
+```sh
+uv run tools/build_shards.py --out data/corpus-v0 \
+    --wiki-defs data/raw/wikipedia/wiki2017-defs.txt \
+    --corpus-dir data/raw/textcorpus \
+    --gutenberg-tree data/raw/gutenberg-mirror
+# -> 5.3 M protocol-safe, deduped, lang-tagged docs w/ provenance manifest
+./build/ig-train --data data/corpus-v0/shard-0000.bin --steps 800 --sample 150
 ```
 
 ## Layout

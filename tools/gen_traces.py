@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# ///
 """gen_traces.py — tool-use trajectory generation via the local teacher
 (Decision D3: llama.cpp server at 127.0.0.1:8180, OpenAI-compatible API).
 

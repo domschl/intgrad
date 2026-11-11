@@ -1,5 +1,17 @@
 build/
+build-dbg/
 compile_commands.json
 .cache/
 *.o
 *.d
+
+# ---------------------------------------------------------------------------
+# Training data: NEVER commit. Much of it is not openly licensed
+# (research-only per Decision D5); the repo stores pipeline code only.
+# ---------------------------------------------------------------------------
+data/*
+!data/sample.txt    # small synthetic corpus, authored for this repo (MIT)
+.DS_Store
+._*
+__pycache__/
+.venv/
