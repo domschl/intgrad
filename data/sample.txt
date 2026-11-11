@@ -1,0 +1,30 @@
+The quick brown fox jumps over the lazy dog.
+The rain in Spain falls mainly on the plain.
+Pack my box with five dozen liquor jugs.
+get_weather(city="Paris") -> sunny, 21C
+get_weather(city="Berlin") -> cloudy, 17C
+get_weather(city="Madrid") -> clear, 26C
+calc(expression="2+2") -> 4
+calc(expression="3*7") -> 21
+calc(expression="100/4") -> 25
+The cat sat on the mat.
+The dog played in the park.
+search(query="tallest mountain") -> Everest, 8849m
+search(query="largest ocean") -> Pacific Ocean
+A journey of a thousand miles begins with a single step.
+Actions speak louder than words.
+get_time() -> 12:00
+get_time() -> 14:30
+List(3 items: milk, eggs, bread) -> milk, eggs, bread
+The weather in Paris is sunny today.
+The weather in Berlin is cloudy today.
+The weather in Madrid is clear today.
+sum(1,2) -> 3
+sum(4,5) -> 9
+First, solve the problem. Then, celebrate.
+Practice makes perfect.
+lookup(name="alice") -> user id 1001
+lookup(name="bob") -> user id 1002
+Better late than never.
+finish() -> done
+finish() -> done

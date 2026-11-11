@@ -1,0 +1,42 @@
+/* Micrograd-style scalar autograd, with quantization applied at every op
+ * output (quant-aware training): values are floats in the host code, but
+ * each forward result is passed through the byte round-trip so the network
+ * learns to be robust to its own integer arithmetic.
+ *
+ * Gradients are accumulated in float and quantized on parameter update.
+ */
+#ifndef IG_VALUE_H
+#define IG_VALUE_H
+
+#include <stdint.h>
+
+typedef struct ig_Value {
+    float data;
+    float grad;
+    struct ig_Value **children;
+    int nchildren;
+    void (*backprop)(struct ig_Value *self); /* NULL for leaves */
+    int _seen;                               /* internal: topo-pass marker */
+} ig_Value;
+
+/* Toggle quantization on/off (off = exact float mode, used for gradient checks). */
+extern int ig_quant_enabled;
+
+/* Graph arena. ig_reset() frees ALL intermediate values (params must live
+ * outside the arena, i.e. created before... no: params use ig_value_persist()). */
+void        ig_reset(void);                 /* free arena intermediates */
+ig_Value   *ig_value(float x);              /* leaf, arena-allocated */
+ig_Value   *ig_value_persist(float x);      /* leaf, malloc (for parameters) */
+void        ig_value_free_persist(ig_Value *v);
+
+void        ig_backward(ig_Value *loss);    /* topological reverse-mode AD */
+
+/* Ops (all quantize their output when ig_quant_enabled): */
+ig_Value   *ig_add(ig_Value *a, ig_Value *b);
+ig_Value   *ig_sub(ig_Value *a, ig_Value *b);
+ig_Value   *ig_mul(ig_Value *a, ig_Value *b);
+ig_Value   *ig_tanh(ig_Value *a);
+ig_Value   *ig_relu(ig_Value *a);
+ig_Value   *ig_logsumexp(const ig_Value **xs, int n);
+
+#endif /* IG_VALUE_H */

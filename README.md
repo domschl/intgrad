@@ -1,0 +1,44 @@
+# intgrad
+
+A tiny deep-learning framework in plain C: micrograd-style scalar autograd
+where **every value is one byte** (logarithmic quantization), trained
+directly on **raw UTF-8 bytes** — no tokenizer.
+
+Goal: a "cognitive core" — a minimal LLM that generates coherent text and
+learns tool usage, fitting a CPU + 12 GB VRAM budget. See
+[docs/PLAN.md](docs/PLAN.md) for milestones, data strategy, and the
+distillation plan.
+
+## Numerics
+
+Every scalar is stored as a single `uint8` in a symmetric log domain
+(`include/ig/logquant.h`): sign bit + 7-bit log magnitude with a global
+scale. Multiplication is an addition of magnitudes; addition uses the
+`log1p(exp)` identity via LUT. Quantization is applied at every forward op
+output (quant-aware training), so the network learns to tolerate its own
+integer arithmetic.
+
+## Build
+
+```sh
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+```
+
+## Try it
+
+```sh
+./build/ig-train --data data/sample.txt --steps 2000 --ctx 4 --hidden 64 --sample 200
+./build/ig-train --no-quant ...   # exact-float mode, to isolate quantization effects
+```
+
+## Layout
+
+```
+include/ig/     public headers (logquant, value/autograd, net, data)
+src/            implementation + ig-train (M2 byte-MLP proof of concept)
+tests/          quant round-trip + gradient checks (ctest)
+docs/PLAN.md    full project plan: milestones, data, distillation, risks
+data/           tiny sample corpus for smoke training
+```
