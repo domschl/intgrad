@@ -49,6 +49,17 @@ ctest --test-dir build
 uv run tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin
 ```
 
+## Training & resume semantics
+
+`--steps` is the **total horizon** (absolute), `--save` writes checkpoints
+containing: params (fp32 + byte code), **Adam moments**, **steps done**,
+and **RNG position** — so `--load` continues the LR schedule and data order
+bit-exactly (guarded by `ctest` checkpoint test; atomic tmp+rename writes,
+`--save-every N` for crash-safe periodic saves). Hyperparameters (lr, batch,
+arch, warmup, sched) are *not* in the checkpoint: pass the same flags on
+resume. Note a cosine run of N steps is not a prefix of a longer horizon —
+always give every segment the same total `--steps`.
+
 ## Data (never committed — see docs/DATA.md)
 
 Starter corpus **corpus-v0** built from local sources (2.7 GB Wikipedia-2017

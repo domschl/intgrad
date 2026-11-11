@@ -69,9 +69,17 @@ uv run tools/build_shards.py --out data/corpus-v1-wiki \
    post-build manifest `verify` step must report `problems: 0`).
    Known v1 stripper artifacts: rare `[ ]` residues, template-glitch word
    joins — acceptable at scale; improve if val-bpb stalls.
-   NOTE: corpus-v0 manifests were built with an off-by-SEP doc-offset bug
-   (fixed later in the same session); v0 *content* is fine for random-byte
-   training, rebuild `data/corpus-v0` before relying on its doc boundaries.
+   ~~NOTE: corpus-v0 manifest offset bug~~ **v0 rebuilt & re-verified**
+   (5,311,756 docs, `verify problems: 0`, protocol scan clean). Rebuild
+   also fixed: UTF-8 BOMs stripped; "Produced by …" credit paragraphs that
+   sit *after* the START marker removed; all docs `strip()`ped at ingest
+   (invariant: docs never start/end with whitespace → SEP boundaries
+   unambiguous, enforced by verify).
+   Known residual v0 front-matter artifacts (per-book, low frequency,
+   documented not chased): "Transcriber's Notes:" blocks, publisher
+   catalogs, "E-text prepared by" credit wording variants, `[Illustration:`
+   marks. Quality filters (DATA.md step list) are the right tool if these
+   show up in bad generations.
 2. **Multilingual Latin corpus v1**: PG mirror already carries de/fr/es/it/
    pt/nl books (detector keeps them); optionally add FineWeb-2 / OSCAR
    slices via `uv run --with datasets …` when prose diversity beyond

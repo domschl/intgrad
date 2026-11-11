@@ -29,6 +29,23 @@ ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target);
 
 void ig_mlp_zero_grad(ig_MLP *m);
 void ig_mlp_sgd_update(ig_MLP *m, float lr); /* update + byte round-trip */
+void ig_mlp_scale_grads(ig_MLP *m, float s); /* for batch-mean loss */
+
+/* Adam (M2). Biases-corrected; single-MLP-per-process state (documented
+ * limitation until the tensor path). Honors ig_pure_int (gradient byte
+ * round-trip) and ig_quant_enabled (param grid round-trip). */
+void ig_mlp_adam_update(ig_MLP *m, float lr);
+void ig_mlp_adam_reset(void);
+
+/* Checkpoints: 'IGCK' + dims + scales + (fp32 value, byte code) per param
+ * + Adam moments + run-progress state (steps done, RNG position) so a
+ * resumed run continues the LR schedule and data order bit-exactly (v3).
+ * steps_out/rng_out receive the stored progress (0 if absent). */
+int     ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
+                    uint64_t rng); /* atomic: writes <path>.tmp then rename */
+ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out);
+#define ig_mlp_save(m, p) ig_mlp_save2((m), (p), 0, 0)
+#define ig_mlp_load(p)    ig_mlp_load2((p), NULL, NULL)
 
 /* Gradient-flow analysis (D1 instrumentation). Prints one line per param
  * group: n, mean|g|, max|g|, zero-collapse fraction (gradients that

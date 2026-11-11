@@ -16,6 +16,7 @@ add_library(intgrad
   src/value.c
   src/net.c
   src/data.c
+  src/dataset.c
 )
 target_include_directories(intgrad PUBLIC include)
 target_link_libraries(intgrad PUBLIC m)
@@ -32,6 +33,10 @@ enable_testing()
 add_executable(test_logquant tests/test_logquant.c)
 target_link_libraries(test_logquant PRIVATE intgrad)
 add_test(NAME logquant COMMAND test_logquant)
+
+add_executable(test_checkpoint tests/test_checkpoint.c)
+target_link_libraries(test_checkpoint PRIVATE intgrad)
+add_test(NAME checkpoint COMMAND test_checkpoint)
 
 add_executable(test_autograd tests/test_autograd.c)
 target_link_libraries(test_autograd PRIVATE intgrad)
