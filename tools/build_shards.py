@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,8 +60,18 @@ PG_ENDS = (b"*** END OF", b"***END OF", b"*** END",
            b"End of this Project Gutenberg", b"End of The Project Gutenberg")
 
 
+# "Produced by ..." credits paragraph: some PG layouts put it AFTER the
+# START marker, so it survives the header cut. Matches exactly ONE
+# paragraph (lines up to the first blank line; non-greedy, so body text
+# is never swallowed). Requires LF-only input (CRLF normalized first).
+_CREDITS = re.compile(
+    rb"^(?:Produced|Prepared|Illustrated|Transcribed) by\b(?:[^\n]*\n)+?\n",
+    re.I)
+
+
 def strip_gutenberg_wrapper(raw: bytes) -> bytes:
     """Cut Project Gutenberg boilerplate header/footer when present."""
+    raw = raw.replace(b"\r\n", b"\n")  # uniform lines for marker + credits logic
     window = raw[:8192]
     lo = -1
     for marker in PG_STARTS:
@@ -78,11 +89,17 @@ def strip_gutenberg_wrapper(raw: bytes) -> bytes:
             hi = i
     if hi >= 0:
         raw = raw[:hi]
+    lead = raw.lstrip(b" \t\r\n")
+    m = _CREDITS.match(lead[:4096])
+    if m:  # only if it sits at the very top of the remaining text
+        raw = lead[m.end():]
     return raw
 
 
 def to_utf8(raw: bytes) -> bytes:
     """Normalize mixed PG encodings (ascii/latin-1/cp1252/utf-8) to UTF-8."""
+    if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
+        raw = raw[3:]
     try:
         raw.decode("utf-8")
         return raw
@@ -146,8 +163,6 @@ def doc_from_wiki_line(line: bytes) -> bytes | None:
         return body  # lead already mentions the title; keep prose clean
     return title.strip() + b": " + body
 
-
-import re
 
 _RE = {
     "comment": re.compile(r"<!--.*?-->", re.S),
@@ -346,7 +361,8 @@ def build(args):
     allowed = set(args.langs.split(","))
     for doc, src, kind in iter_docs(args):
         stats["docs_in"] += 1
-        if len(doc) < args.min_doc_bytes:
+        doc = doc.strip()  # invariant: docs never start/end with whitespace,
+        if len(doc) < args.min_doc_bytes:  # so SEP boundaries are unambiguous
             stats["docs_short"] += 1
             continue
         if kind == "wiki2017":
