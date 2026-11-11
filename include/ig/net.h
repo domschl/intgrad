@@ -30,4 +30,18 @@ ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target);
 void ig_mlp_zero_grad(ig_MLP *m);
 void ig_mlp_sgd_update(ig_MLP *m, float lr); /* update + byte round-trip */
 
+/* Gradient-flow analysis (D1 instrumentation). Prints one line per param
+ * group: n, mean|g|, max|g|, zero-collapse fraction (gradients that
+ * quantize to 0 at the current gscale) and saturation fraction. */
+typedef struct {
+    long n;
+    double mean_abs;
+    float max_abs;
+    float zero_frac;    /* nonzero g collapsed to 0 by quantization */
+    float true_zero_frac; /* structurally-zero gradients (never touched) */
+    float sat_frac;     /* g clamps at the grid edge */
+} ig_GradStat;
+
+ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group); /* group 0..3 = W1,b1,W2,b2 */
+
 #endif /* IG_NET_H */

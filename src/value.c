@@ -8,6 +8,7 @@
 #include "ig/logquant.h"
 
 int ig_quant_enabled = 1;
+int ig_pure_int = 0;
 
 /* ------------------------------------------------------------------ */
 /* Bump arena for graph intermediates (micrograd: python GC does this) */

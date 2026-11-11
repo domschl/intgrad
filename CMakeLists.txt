@@ -24,6 +24,10 @@ target_compile_options(intgrad PRIVATE -Wall -Wextra -Wshadow)
 add_executable(ig-train src/train.c)
 target_link_libraries(ig-train PRIVATE intgrad)
 
+add_executable(ig-pretty tools/ig-pretty.c)
+
+target_include_directories(ig-pretty PRIVATE include)
+
 enable_testing()
 add_executable(test_logquant tests/test_logquant.c)
 target_link_libraries(test_logquant PRIVATE intgrad)

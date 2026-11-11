@@ -22,6 +22,13 @@ typedef struct ig_Value {
 /* Toggle quantization on/off (off = exact float mode, used for gradient checks). */
 extern int ig_quant_enabled;
 
+/* D1: pure-int mode. Gradients are quantized to the log-byte grid (at
+ * ig_get_gscale()) before they touch the weights, so the whole
+ * value->gradient->update path is byte-representable. Reference mode: the
+ * float accumulation inside this file emulates an int accumulator; the
+ * true int-domain accumulator arrives with the tensor path (M5.5). */
+extern int ig_pure_int;
+
 /* Graph arena. ig_reset() frees ALL intermediate values (params must live
  * outside the arena, i.e. created before... no: params use ig_value_persist()). */
 void        ig_reset(void);                 /* free arena intermediates */

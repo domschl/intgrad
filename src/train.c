@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "ig/data.h"
+#include "ig/logquant.h"
 #include "ig/net.h"
 #include "ig/value.h"
 
@@ -46,6 +47,7 @@ int main(int argc, char **argv)
 {
     const char *path = "data/sample.txt";
     int steps = 2000, ctx = 4, nh = 64, nsample = 0, seed = 42;
+    int grad_stats = 0;
     float lr = 0.05f;
 
     for (int i = 1; i < argc; i++) {
@@ -60,6 +62,9 @@ int main(int argc, char **argv)
         OPT("--lr", lr = (float)atof(argv[i]))
 #undef OPT
         else if (!strcmp(argv[i], "--no-quant")) ig_quant_enabled = 0;
+        else if (!strcmp(argv[i], "--pure-int")) ig_pure_int = 1;
+        else if (!strcmp(argv[i], "--grad-stats")) grad_stats = 1;
+        else if (!strcmp(argv[i], "--gscale") && i + 1 < argc) ig_set_gscale((float)atof(argv[++i]));
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
 
@@ -72,8 +77,9 @@ int main(int argc, char **argv)
     rng = (uint32_t)seed;
 
     ig_MLP *m = ig_mlp_new(ctx, nh, (unsigned)seed);
-    printf("ig-train: %zu bytes, ctx=%d hidden=%d quant=%s params=%d\n",
+    printf("ig-train: %zu bytes, ctx=%d hidden=%d quant=%s pure-int=%d gscale=%g params=%d\n",
            len, ctx, nh, ig_quant_enabled ? "log8" : "off",
+           ig_pure_int, ig_get_gscale(),
            ctx * IG_VOCAB * nh + nh + nh * IG_VOCAB + IG_VOCAB);
 
     clock_t t0 = clock();
@@ -83,6 +89,16 @@ int main(int argc, char **argv)
         ig_Value **logits = ig_mlp_forward(m, data + pos - ctx);
         ig_Value *loss = ig_mlp_loss(m, logits, data[pos]);
         ig_backward(loss);
+        if (grad_stats && step % 200 == 0) {
+            static const char *names[4] = { "W1", "b1", "W2", "b2" };
+            for (int gi = 0; gi < 4; gi++) {
+                ig_GradStat gs = ig_mlp_grad_stats(m, gi);
+                printf("  grads[%s] n=%ld mean|g|=%.3e max|g|=%.3e collapse=%.2f%% true0=%.1f%% sat=%.2f%%\n",
+                       names[gi], gs.n, gs.mean_abs, gs.max_abs,
+                       100.0 * gs.zero_frac, 100.0 * gs.true_zero_frac,
+                       100.0 * gs.sat_frac);
+            }
+        }
         ig_mlp_sgd_update(m, lr);
         free(logits); /* pointer array only; graph nodes live in the arena */
         if (step % 100 == 0 || step == steps - 1)

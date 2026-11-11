@@ -27,12 +27,24 @@ Mostly, with two real tensions we design around:
      (~3.5% per value with our 7-bit magnitude, Δ=0.1), which handles the
      many-orders-of-magnitude dynamic range of activations/gradients — the
      exact failure mode of linear INT8.
-   - **Float master weights** on the outside (128 GB RAM makes this cheap):
-     the SGD/Adam update accumulates gradients in float and rounds the
-     *stored* weight through the byte grid. This is standard "fake-quant"
-     QAT. If you insist on *no float anywhere*, we switch to
-     stochastic-rounding + log-domain optimizer state in a later milestone
-     (flagged as research-risky, milestone M5).
+   - **Pure-int training is the MAINLINE goal (Decision D1, 2026-07-27).**
+     No float master weights by default: gradients live in the same
+     log-byte domain (`--pure-int` flag, implemented), optimizer state is
+     log-quantized, weight updates happen as additions in the log domain
+     with **stochastic rounding** (required at our precision, else small
+     gradients never move weights). Float fake-quant remains available
+     (`--no-quant` / quant-off) purely as the diagnostic oracle.
+     Strategy: instrument gradient flow (magnitudes, zero-collapse and
+     saturation fractions per tensor, implemented as `ig_grad_stats`),
+     adapt int scaling (per-tensor gradient scales, gradient clipping in
+     the log domain, loss scaling as scale-shift which is free in this
+     domain) — and only if a gate fails after these levers do we fall back
+     to fp32 optimizer state (last resort, explicit sign-off needed).
+   - Known research risks we carry: pure-int Adam moments are finicky
+     (mitigation: log-domain moment estimates = EMA of log|g|, exact
+     integer ops), stochastic-rounding variance (mitigation: higher-entropy
+     rounding dither, batch-size increase). These get their own milestone
+     gate (M5.5).
 2. **Byte-level models need ~3–4× more compute/tokens than BPE models** for
    the same text quality (one word ≈ 3–5 bytes ≈ 3–5 prediction steps).
    For a *cognitive core* this is acceptable and even desirable: bytes give
@@ -62,7 +74,10 @@ code 129..255 -> −(2^((code−128)·0.1) − 1)/S
 - **Addition** → `log(eᵖ+eᑫ) = max + log1p(e^(−|p−q|))` → 128×128 LUT,
   precomputed at init, cache-resident (16 KB).
 - **Scales**: global `S` for now; per-tensor scales (calibrated from
-  histograms of a calibration run) in M4; per-channel for GEMM weights in M5.
+  histograms of a calibration run) in M4; per-channel for GEMM weights in
+  M5. In pure-int mode, scales are restricted to powers of two (a shift),
+  so nothing but ints exists at runtime; scale *choice* is offline
+  calibration work, not a runtime datatype.
 - **Nonlinearities** (tanh/softmax/RMSNorm): LUTs over the 256-code domain —
   every activation function becomes a 256-byte table. This is the secret
   weapon of byte-log arithmetic: activation cost = one table lookup.
@@ -90,6 +105,13 @@ Principle: **narrow, high-quality, protocol-rich, legally clean.** A 10–20 M
 model cannot memorize the web; we spend the budget where coherence and
 tool-behavior live.
 
+0. **Language curriculum (Decision D4)**: corpus v1 = Latin-script
+   European languages (en, de, fr, es, it, pt, pl, nl, … — sized by
+   available clean data, English largest). v2 adds Cyrillic, then CJK —
+   these are *free* at the datatype level (bytes don't care) and cost only
+   data + compute, no architecture change. The input conv stem (§4.6) is
+   designed now so v2 needs no re-train from scratch (extend vocab of
+   layers, keep stem).
 1. **Coherence substrate (~300 M–1 G bytes)** — public-domain & permissive
    prose: Gutenberg books (public domain), Wikipedia dump (CC-BY-SA,
    abstracts subset), Python/JSON/Markdown from permissively-licensed GitHub
@@ -125,6 +147,45 @@ tool-behavior live.
    → optional preference-style fine-tune on rejection-sampled best traces.
    All at byte level: dataset pipeline is just `u8` streams + document
    boundaries + loss masks (loss on model turns only).
+6. **Teacher infrastructure (Decision D3)**: local llama.cpp server
+   `http://127.0.0.1:8180` (OpenAI-compatible). Current pool: Qwen3.8-Next
+   (default generation teacher), Gemma4 12/26/31 B for cross-checking
+   (judge / rejection sampling), EmbeddingGemma for dedup, clustering and
+   near-duplicate exclusion. `tools/gen_traces.py` drives it; more models
+   can be dropped into the server presets as needed.
+
+### 4.6 Input conv stem for multibyte UTF-8 (D4 design answer)
+
+Question: *small convolution at the start to handle multibyte sequences?*
+**Yes — as a cheap ablatable causal-conv stem; it's the right call for our
+size class.** Reasoning:
+
+- A transformer has no privileged notion of a UTF-8 character: a 2–4 byte
+  character is just a run of adjacent positions. Attention *can* learn it,
+  but spends scarce depth/heads of a ≤30 M model on local composition.
+  Bytes Under Attack (Chirkova & Vulić, EACL 2022) showed a char-level conv
+  before byte-level T5 fixes most multibyte splicing damage; ByteLatent
+  Transformer (2024) reaches the same conclusion via 4-byte patching.
+- Our stem: width-3 causal depthwise conv → pointwise to d_model, log-int
+  arithmetic, ~5–10 k params. It captures the UTF-8 lead/continuation
+  pattern (0b110xxxxx followed by 0b10xxxxxx) and n-gram spelling in one
+  layer, freeing attention for long-range structure. Dilated variants
+  stay open for CJK-heavy v2.
+- It is *also* what makes the language curriculum cheap: the stem is
+  script-agnostic (operates on bytes), so v2 languages need no new stem.
+- M3 acceptance includes a stem on/off ablation on Latin text and (added
+  when v2 data arrives) on CJK bpb. If the ablation shows ≤0.01 bpb gain
+  we drop it — the stem is engineering, not dogma.
+
+Wire protocol (Decision D2 — control bytes):
+
+- `0x00 ESC` + role byte inside the stream: `0x01` call-start, `0x02`
+  args-separator, `0x03` result-ok, `0x04` result-err, `0x05` end-of-turn,
+  `0x06/0x07` sys/user turn markers. Defined in `include/ig/protocol.h`
+  and never appear in prose, so they cannot be spliced from training text.
+- `ig-pretty` (tools/) translates streams ⇄ human-readable
+  `⟪CALL⟫ … ⟪ARGS⟫ … ⟪RES⟫ …` markup for logs and debugging (D2: raw
+  byte stream stays canonical, human-readability is a view).
 
 ## 5. Distillation — yes, and it's the plan's backbone
 
@@ -175,10 +236,11 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
 | **M0** ✅ | Scaffold: CMake+Ninja, layout, CI-able `ctest` | build+tests green | done |
 | **M1** ✅ | Log-byte codec + micrograd-style autograd, quant-aware forward; gradcheck tests | `ctest` green; `--no-quant` vs log8 parity diff measurable | done |
 | **M2** | Byte-MLP next-byte trainer (**in repo, hardening**): proper batched SGD→Adam, LR schedule, checkpoints | loss↓ on sample corpus; byte-level val bpb reported; generated text resembles corpus style | ~1 wk |
-| **M3** | **Byte-transformer** (pre-LN/RMSNorm, RoPE, SwiGLU via LUTs, tied 256-way head), ctx 512, ~7 M params, on tensor core path (CPU int blocks + LUT activations) | val bpb beats M2-MLP by ≥15%; 512-byte samples with paragraph-level coherence | 2–3 wk |
+| **M3** | **Byte-transformer** (pre-LN/RMSNorm, RoPE, SwiGLU via LUTs, tied 256-way head) + **ablatable causal byte-conv stem** (§4.6), ctx 512, ~7 M params, on tensor core path (CPU int blocks + LUT activations) | val bpb beats M2-MLP by ≥15%; conv-stem ablation reported; 512-byte samples with paragraph-level coherence | 2–3 wk |
 | M3.5 | **Numerics gate**: fp32-mode vs log8-mode bpb gap | gap ≤ 0.15 bpb after QAT fine-tune | +1 wk |
 | **M4** | **Tool protocol + agent data pipeline**: wire format, mock-tool sandbox, teacher-trajectory generator + replay filter, loss-masking data format | 10 k verified trajectories; held-out trace-set (JSON validity 100%) | 2 wk |
 | **M5** | **CUDA backend** + int8 block GEMM; parity harness; throughput ≥ 10 k Bbytes/s train | parity tests green; 24 h soak run stable | 3–4 wk |
+| **M5.5** | **Pure-int training gate (mainline, D1)**: log-domain Adam + stochastic rounding + gradient-flow instrumentation; per-tensor gradient scales calibrated | pure-int run reaches ≥ 95% of fp-oracle val bpb at M3 scale; no NaN/divergence over 48 h soak; gradient zero-collapse < 2% and saturation < 1% on all tensors | 2–3 wk |
 | **M6** | **Distillation runs**: fp32 teacher (≈30 M) → log8 student; byte-marginalized KD from a local 7–14 B llama.cpp teacher for SFT/tool phase | student ≥ 80% of teacher tool-call success rate; prose coherence eval (§8) ≥ 0.8 of teacher | 2–3 wk |
 | **M7** | **Cognitive-core eval + tuning**: held-out tool benchmarks, refusal-to-hallucinate probes ("what's today's weather?" → must call tool), long-context needle test; optional MoE; optional pure-int-training experiment (research flag) | benchmark suite scripted; core behaviors ≥ target table agreed in M4 | 2–3 wk |
 | **M8** | Release: `ig-run` inference REPL (byte stream in/out, tool bridge), quantized model card, repro `make demo` | demo runs on this box in <4 GB VRAM | 1 wk |
@@ -194,51 +256,59 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
   KPI, we track it from M4 onward.
 - **Numerics**: bpb gap log8-vs-fp32 on a fixed val shard.
 
-## 9. Clarifications & open questions (⚠ = need your answer)
+## 9. Decisions log (settled 2026-07-27) & remaining questions
 
-Resolved ambiguities (assumptions made, reversible):
+- **D1 — Pure-int training is mainline.** No float master weights / fp32
+  optimizer by default. We instrument gradient flow, tune int scaling
+  (per-tensor power-of-two scales, log-domain clipping, stochastic
+  rounding); fp32 optimizer state is the *last resort only*, requiring an
+  explicit failed-gate sign-off. Gate: **M5.5**. Float mode stays in the
+  codebase as the diagnostic oracle (`--no-quant`).
+- **D2 — Control bytes for the tool protocol** (see §4.6 +
+  `include/ig/protocol.h`). Human-readability via the `ig-pretty`
+  translator; raw byte stream stays canonical.
+- **D3 — Teacher is local only**: llama.cpp server at `127.0.0.1:8180`
+  (Qwen3.8-Next active; Gemma4 pool; EmbeddingGemma for dedup).
+- **D4 — Language curriculum**: Latin-family corpus first, then Cyrillic /
+  CJK by adding data only. Input causal byte-conv stem included in M3
+  (§4.6), with ablation evidence required to keep it.
+- **D5 — Licensing**: code is **MIT** (`LICENSE`); training data is
+  **research-only**, so we do *not* gate corpora on redistributable
+  licenses. We still keep per-shard provenance manifests (debugging data
+  bugs is 10× easier with provenance) and still prefer public-domain /
+  permissive sources where quality is equal (they're cleaner and stable).
 
-- **A1** "Integer bytes" = every *tensor element* is 1 byte; dot products
-  necessarily use a wider int accumulator per block, and (assumption
-  **⚠Q1**) optimizer state + master weights may live in fp32 ("fake-quant
-  QAT"). Pure-int optimizer (no float anywhere, incl. updates) is scheduled
-  as opt-in research milestone M7-R because INT8-state Adam is known to be
-  finicky at small scale.
-- **A2** Log scheme is symmetric log(1+x) (keeps exact zero + sign). A pure
-  log-domain (zero = special code) variant with better mul accuracy is an
-  M3 alternative; we benchmark both.
-- **A3** "No tokenizer" applies to the model, not to humans: an inference
-  CLI may pretty-print UTF-8. Byte-level also removes the *detokenizer*
-  failure class (splices, mojibake).
-- **A4** Tool interface = ASCII wire protocol embedded in the byte stream
-  with reserved control bytes (0x00 = start-call, 0x01 = result, 0x02 =
-  end-of-turn). They're valid UTF-8 but never occur in prose — **⚠Q2**: do
-  you prefer pure-printable marker sequences (e.g. `⟨⟨call …⟩⟩`) for
-  human-readable traces? Trade-off: markers can be spliced/half-emitted;
-  control bytes can't but are invisible in logs.
-- **A5** English-first core; CJK etc. naturally supported by the byte
-  alphabet, but coherence quality follows data volume per script. **⚠Q3**:
-  target languages for the core corpus?
-- **A6** Teacher models: any open model we can run locally
-  (llama.cpp / Ollama on this box; 128 GB RAM even allows big CPU teachers
-  for data-gen), plus **⚠Q4**: do you also have API access you want used
-  for the higher-quality trajectory generation?
-- **A7** Licenses: plan assumes training on public-domain/permissive sets;
-  if this is research-only, more sources open up. **⚠Q5**: is this a
-  research or redistributable-product project?
-- **A8** Karpathy-micrograd parity means: scalar autograd reference kept
-  forever as the *numerical oracle*; production training obviously uses the
-  batched path. (No expectation that scalar autograd itself trains the LLM.)
+Remaining minor questions (non-blocking, answer anytime):
+
+- **R1** Max tool-result size before truncation/summarization policy
+  (affects ctx=1024 budget)? Default plan: 512 bytes inline, else the tool
+  returns a handle the model can `read(handle, offset)`.
+- **R2** Is M5.5 (pure-int gate) a hard blocker for M6 distillation, or
+  may distillation start against fp-oracle checkpoints in parallel
+  (faster overall, slightly more rework if the gate fails)?
+- **R3** Stochastic-rounding seed policy: fixed per-run for
+  reproducibility (default) vs entropy?
+- **A8** (unchanged) micrograd parity = scalar autograd kept forever as
+  the numerical oracle; production training uses the batched path.
 
 ## 10. Top risks
 
-1. **Log-byte quant during training diverges/plateaus** → M3.5 gate;
-   fallbacks: per-channel scales → STE variants → fp32-train + quant-infer
-   only (violates C1's spirit; last resort, flagged).
+1. **Pure-int training diverges or plateaus (D1 raises this from risk #1
+   to the project's central bet).** Levers in order: per-tensor power-of-2
+   gradient scales → log-domain gradient clipping → stochastic-rounding
+   dither tuning → larger effective batch → log-domain Adam (M5.5).
+   Fallback of last resort (sign-off required): fp32 optimizer state,
+   keep int weights/activations/gradients. The gradient-flow
+   instrumentation (`ig_grad_stats`) exists specifically to tell us which
+   lever to pull.
 2. **Byte-level pretrain too slow on CPU-only phase** → start CUDA earlier
    (swap M5 before M4 if throughput < 2 k Bbytes/s on CPU).
 3. **Teacher bias in tool traces** → replay filter catches most; keep a
-   human-audited 500-trace golden set.
+   human-audited 500-trace golden set; cross-check with a second teacher
+   family (Qwen vs Gemma4) on the golden set.
 4. **Coherence ceiling** (~20 M model) → manage scope: short-form
    assistant behavior, not novels; MoE option in M7.
-5. **Dataset license creep** → keep per-shard provenance manifest from day 1.
+5. **Data-quality debt without license gates** → research-only (D5) lets
+   us use more data but removes the "curated-source" free quality filter;
+   counter with dedup (MinHash + EmbeddingGemma near-dup), classifier
+   quality-filter, per-shard provenance manifests.

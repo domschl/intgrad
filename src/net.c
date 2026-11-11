@@ -103,8 +103,44 @@ static void sgd_list(ig_Value **ps, long n, float lr)
 {
     for (long i = 0; i < n; i++) {
         ig_Value *p = ps[i];
-        float v = p->data - lr * p->grad;
+        float g = p->grad;
+        if (ig_pure_int) g = ig_roundtrip_g(g); /* D1: gradient on the byte grid */
+        float v = p->data - lr * g;
         p->data = ig_quant_enabled ? ig_roundtrip(v) : v;
+    }
+}
+
+static ig_GradStat stats_list(ig_Value **ps, long n)
+{
+    ig_GradStat s = { 0 };
+    s.n = n;
+    long ztrue = 0, zq = 0, sat = 0;
+    for (long i = 0; i < n; i++) {
+        float g = ps[i]->grad;
+        float a = fabsf(g);
+        s.mean_abs += a;
+        if (a > s.max_abs) s.max_abs = a;
+        uint8_t c = ig_encode_s(g, ig_get_gscale());
+        if (g == 0.0f) ztrue++;             /* structural zero (e.g. one-hot) */
+        else if (c == 0) zq++;              /* nonzero gradient collapsed by quantization */
+        else if ((c & 0x7Fu) == IG_MAX_CODE) sat++;
+    }
+    if (n > 0) {
+        s.mean_abs /= (double)n;
+        s.zero_frac = (float)zq / (float)n; /* collapse only; true zeros excluded */
+        s.true_zero_frac = (float)ztrue / (float)n;
+        s.sat_frac = (float)sat / (float)n;
+    }
+    return s;
+}
+
+ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group)
+{
+    switch (group) {
+    case 0: return stats_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh);
+    case 1: return stats_list(m->b1, m->nh);
+    case 2: return stats_list(m->W2, (long)m->nh * IG_VOCAB);
+    default: return stats_list(m->b2, IG_VOCAB);
     }
 }
 

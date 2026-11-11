@@ -18,6 +18,18 @@ scale. Multiplication is an addition of magnitudes; addition uses the
 output (quant-aware training), so the network learns to tolerate its own
 integer arithmetic.
 
+## Decisions (settled — see docs/PLAN.md §9)
+
+- **D1** Pure-int training is mainline (no float master weights; fp32
+  optimizer = last resort with sign-off). Gate: milestone **M5.5**.
+- **D2** Tool protocol = control bytes (`include/ig/protocol.h`);
+  `ig-pretty` translates streams ⇄ human-readable markup.
+- **D3** Teacher = local llama.cpp server at `127.0.0.1:8180`
+  (`tools/gen_traces.py`).
+- **D4** Latin-family corpus first, then multibyte scripts by adding data;
+  ablatable causal byte-conv stem in the M3 architecture.
+- **D5** Code: MIT. Data: research-only (provenance manifests anyway).
+
 ## Build
 
 ```sh
@@ -30,7 +42,11 @@ ctest --test-dir build
 
 ```sh
 ./build/ig-train --data data/sample.txt --steps 2000 --ctx 4 --hidden 64 --sample 200
-./build/ig-train --no-quant ...   # exact-float mode, to isolate quantization effects
+./build/ig-train --no-quant ...      # exact-float oracle mode (diagnostics)
+./build/ig-train --pure-int --grad-stats --gscale 8192 --steps 500
+./build/ig-pretty < stream.bin       # control bytes -> ⟪CALL⟫ … markup
+./build/ig-pretty -r < markup.txt    # and back
+python3 tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin
 ```
 
 ## Layout

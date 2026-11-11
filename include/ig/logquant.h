@@ -25,12 +25,20 @@
 #define IG_BITS  8
 #define IG_MAX_CODE 127
 
-void     ig_set_scale(float scale);   /* global quantization scale (default 256) */
+void     ig_set_scale(float scale);   /* value scale (default 256) */
 float    ig_get_scale(void);
+void     ig_set_gscale(float scale);  /* gradient scale (default 4096; D1 knob) */
+float    ig_get_gscale(void);
 
-uint8_t  ig_encode(float x);          /* float -> byte */
-float    ig_decode(uint8_t code);     /* byte  -> float */
+uint8_t  ig_encode(float x);          /* float -> byte (value scale) */
+float    ig_decode(uint8_t code);     /* byte  -> float (value scale) */
 float    ig_roundtrip(float x);       /* decode(encode(x)); the simulated quantization error */
+
+/* Explicit-scale variants: gradients use ig_get_gscale(), weights/acts the
+ * value scale; per-tensor scales (M4+) pass their own scale here. */
+uint8_t  ig_encode_s(float x, float scale);
+float    ig_decode_s(uint8_t code, float scale);
+float    ig_roundtrip_g(float g);     /* roundtrip at the gradient scale */
 
 /* Log-domain integer helpers (the "fast path" of the future int kernel): */
 uint8_t  ig_logmul(uint8_t a, uint8_t b);   /* magnitude-domain add with clamp */
