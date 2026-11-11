@@ -9,6 +9,7 @@
 
 int ig_quant_enabled = 1;
 int ig_pure_int = 0;
+int ig_fx_mode = 0;
 
 /* ------------------------------------------------------------------ */
 /* Bump arena for graph intermediates (micrograd: python GC does this) */
@@ -47,7 +48,23 @@ void ig_reset(void)
     g_arena = NULL;
 }
 
-static float qz(float x) { return ig_quant_enabled ? ig_roundtrip(x) : x; }
+static float qz(float x)
+{
+    if (!ig_quant_enabled) return x;
+    if (ig_fx_mode == 2) return x; /* int32-accumulator emulation: no requant */
+    return ig_fx_mode ? ig_fx_roundtrip(x) : ig_roundtrip(x);
+}
+
+/* True iff quantizing x would clamp at the grid edge (vs. round normally).
+ * In-range rounding has STE derivative 1; clamping has derivative 0. */
+static int qz_clamped(float x)
+{
+    if (!ig_quant_enabled || ig_fx_mode == 2) return 0;
+    if (ig_fx_mode == 1)
+        return fabsf(x) > 127.0f * ig_get_fxstep();
+    float maxm = (exp2f((float)IG_MAX_CODE * IG_DELTA) - 1.0f) / ig_get_scale();
+    return fabsf(x) > maxm;
+}
 
 static ig_Value *mk(void)
 {
@@ -73,11 +90,12 @@ ig_Value *ig_value_persist(float x)
 
 void ig_value_free_persist(ig_Value *v) { free(v); }
 
-static ig_Value *op(ig_Value **children, int n, float data,
+static ig_Value *op(ig_Value **children, int n, float raw,
                     void (*bp)(ig_Value *))
 {
     ig_Value *v = mk();
-    v->data = data;
+    v->data = qz(raw);
+    v->clamped = qz_clamped(raw);
     v->backprop = bp;
     v->nchildren = n;
     v->children = arena_alloc(sizeof(ig_Value *) * (size_t)n);
@@ -127,20 +145,26 @@ void ig_backward(ig_Value *loss)
 /* Ops                                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Every backprop honors the clamp mask: d(quant)/dx = 0 outside range,
+ * 1 inside (STE). See value.h note on ig_Value::clamped. */
+
 static void bp_add(ig_Value *s)
 {
+    if (s->clamped) return;
     for (int i = 0; i < s->nchildren; i++)
         s->children[i]->grad += s->grad;
 }
 
 static void bp_sub(ig_Value *s)
 {
+    if (s->clamped) return;
     s->children[0]->grad += s->grad;
     s->children[1]->grad -= s->grad;
 }
 
 static void bp_mul(ig_Value *s)
 {
+    if (s->clamped) return;
     ig_Value *a = s->children[0], *b = s->children[1];
     a->grad += s->grad * b->data;
     b->grad += s->grad * a->data;
@@ -148,18 +172,21 @@ static void bp_mul(ig_Value *s)
 
 static void bp_tanh(ig_Value *s)
 {
+    if (s->clamped) return;
     float local = 1.0f - s->data * s->data;
     s->children[0]->grad += s->grad * local;
 }
 
 static void bp_relu(ig_Value *s)
 {
+    if (s->clamped) return;
     ig_Value *a = s->children[0];
     if (a->data > 0.0f) a->grad += s->grad;
 }
 
 static void bp_logsumexp(ig_Value *s)
 {
+    if (s->clamped) return;
     for (int i = 0; i < s->nchildren; i++)
         s->children[i]->grad +=
             s->grad * expf(s->children[i]->data - s->data);
@@ -168,31 +195,31 @@ static void bp_logsumexp(ig_Value *s)
 ig_Value *ig_add(ig_Value *a, ig_Value *b)
 {
     ig_Value *cs[2] = { a, b };
-    return op(cs, 2, qz(a->data + b->data), bp_add);
+    return op(cs, 2, a->data + b->data, bp_add);
 }
 
 ig_Value *ig_sub(ig_Value *a, ig_Value *b)
 {
     ig_Value *cs[2] = { a, b };
-    return op(cs, 2, qz(a->data - b->data), bp_sub);
+    return op(cs, 2, a->data - b->data, bp_sub);
 }
 
 ig_Value *ig_mul(ig_Value *a, ig_Value *b)
 {
     ig_Value *cs[2] = { a, b };
-    return op(cs, 2, qz(a->data * b->data), bp_mul);
+    return op(cs, 2, a->data * b->data, bp_mul);
 }
 
 ig_Value *ig_tanh(ig_Value *a)
 {
     ig_Value *cs[1] = { a };
-    return op(cs, 1, qz(tanhf(a->data)), bp_tanh);
+    return op(cs, 1, tanhf(a->data), bp_tanh);
 }
 
 ig_Value *ig_relu(ig_Value *a)
 {
     ig_Value *cs[1] = { a };
-    return op(cs, 1, qz(a->data > 0.0f ? a->data : 0.0f), bp_relu);
+    return op(cs, 1, a->data > 0.0f ? a->data : 0.0f, bp_relu);
 }
 
 ig_Value *ig_logsumexp(const ig_Value **xs, int n)
@@ -202,6 +229,5 @@ ig_Value *ig_logsumexp(const ig_Value **xs, int n)
         if (xs[i]->data > m) m = xs[i]->data;
     float sum = 0.0f;
     for (int i = 0; i < n; i++) sum += expf(xs[i]->data - m);
-    ig_Value *v = op((ig_Value **)xs, n, qz(m + logf(sum)), bp_logsumexp);
-    return v;
+    return op((ig_Value **)xs, n, m + logf(sum), bp_logsumexp);
 }

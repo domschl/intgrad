@@ -117,6 +117,9 @@ int main(int argc, char **argv)
             else if (!strcmp(s2, "cosine")) sched_cosine = 1;
             else { fprintf(stderr, "bad --sched %s\n", s2); return 2; }
         }
+        else if (!strcmp(argv[i], "--loss-fp")) ig_loss_fp = 1;
+        else if (!strcmp(argv[i], "--fp-logits")) ig_fp_logits = 1;
+        else if (!strcmp(argv[i], "--fp-params")) ig_fp_params = 1;
         else if (!strcmp(argv[i], "--no-quant")) ig_quant_enabled = 0;
         else if (!strcmp(argv[i], "--pure-int")) ig_pure_int = 1;
         else if (!strcmp(argv[i], "--grad-stats")) grad_stats = 1;

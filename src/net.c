@@ -7,6 +7,10 @@
 
 #include "ig/logquant.h"
 
+int ig_fp_params = 0; /* diagnostic: params stored float (no grid round-trip
+                       * on update): isolates parameter-grid cost from the
+                       * activation/logit grids. */
+
 static uint32_t rng_state;
 static float frand01(void)
 { /* xorshift32 */
@@ -69,21 +73,46 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
         }
         hv[j] = ig_relu(acc);
     }
+    /* D6 hybrid grid: the output/CE path uses the fixed-point byte grid
+     * (constant absolute error), since CE noise scales with the ABSOLUTE
+     * logit error; the log grid's 7% relative step there floors loss (E3). */
+    int qsav = ig_quant_enabled;
+    if (ig_fp_logits) ig_quant_enabled = 0; /* isolation: float logits */
+    ig_fx_mode = ig_fp_logits ? 0 : 2; /* exact accumulation (int32 GEMM) */
     for (int k = 0; k < IG_VOCAB; k++) {
         ig_Value *acc = m->b2[k];
         for (int j = 0; j < nh; j++)
             acc = ig_add(acc, ig_mul(hv[j], m->W2[(size_t)j * IG_VOCAB + k]));
         logits[k] = acc;
     }
+    if (!ig_fp_logits) {
+        ig_fx_mode = 1;
+        for (int k = 0; k < IG_VOCAB; k++) /* single requantization per logit */
+            logits[k]->data = ig_fx_roundtrip(logits[k]->data);
+    }
+    ig_fx_mode = 0;
+    ig_quant_enabled = qsav;
     free(hv);
     return logits;
 }
 
+int ig_loss_fp = 0; /* diagnostic: CE arithmetic from stored values, no requant */
+int ig_fp_logits = 0; /* diagnostic (D6 isolation ladder): logits accumulate
+                       * and stay FLOAT from the output layer onward; only
+                       * the path up to hidden activations is byte-quantized.
+                       * W2 storage still rounds to its grid on update. */
+
 ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target)
 {
     (void)m;
+    int qsav = ig_quant_enabled;
+    if (ig_loss_fp || ig_fp_logits) ig_quant_enabled = 0;
+    ig_fx_mode = (ig_loss_fp || ig_fp_logits) ? 0 : 1; /* D6 CE on fx grid */
     ig_Value *lse = ig_logsumexp((const ig_Value **)logits, IG_VOCAB);
-    return ig_sub(lse, logits[target]);
+    ig_Value *loss = ig_sub(lse, logits[target]);
+    ig_fx_mode = 0;
+    ig_quant_enabled = qsav;
+    return loss;
 }
 
 static void zero_grad_list(ig_Value **ps, long n)
@@ -106,7 +135,7 @@ static void sgd_list(ig_Value **ps, long n, float lr)
         float g = p->grad;
         if (ig_pure_int) g = ig_roundtrip_g(g); /* D1: gradient on the byte grid */
         float v = p->data - lr * g;
-        p->data = ig_quant_enabled ? ig_roundtrip(v) : v;
+        p->data = (ig_quant_enabled && !ig_fp_params) ? ig_roundtrip(v) : v;
     }
 }
 
@@ -217,7 +246,7 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
             c->v = b2 * c->v + (1.0f - b2) * g * g;
             float step = lr * (c->m / bc1) / (sqrtf(c->v / bc2) + eps);
             float nv = p->data - step;
-            p->data = ig_quant_enabled ? ig_roundtrip(nv) : nv;
+            p->data = (ig_quant_enabled && !ig_fp_params) ? ig_roundtrip(nv) : nv;
         }
     }
 }

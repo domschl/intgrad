@@ -26,6 +26,9 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in);
 
 /* loss = CE(logits, target) built into the graph. */
 ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target);
+extern int ig_loss_fp;    /* diagnostic: CE from stored values, no requant */
+extern int ig_fp_logits;  /* diagnostic: float from the logits onward */
+extern int ig_fp_params;  /* diagnostic: params stored float (no grid) */
 
 void ig_mlp_zero_grad(ig_MLP *m);
 void ig_mlp_sgd_update(ig_MLP *m, float lr); /* update + byte round-trip */

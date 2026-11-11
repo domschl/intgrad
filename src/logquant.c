@@ -33,6 +33,18 @@ float ig_decode(uint8_t code) { return ig_decode_s(code, g_scale); }
 float ig_roundtrip(float x) { return ig_decode_s(ig_encode_s(x, g_scale), g_scale); }
 float ig_roundtrip_g(float g) { return ig_decode_s(ig_encode_s(g, g_gscale), g_gscale); }
 
+static float g_fxstep = 0.1f;
+void ig_set_fxstep(float step) { g_fxstep = step; }
+float ig_get_fxstep(void) { return g_fxstep; }
+
+float ig_fx_roundtrip(float x)
+{
+    float q = x / g_fxstep;
+    if (q > 127.0f) q = 127.0f;
+    if (q < -128.0f) q = -128.0f;
+    return lroundf(q) * g_fxstep;
+}
+
 uint8_t ig_logmul(uint8_t a, uint8_t b)
 {
     /* Reference implementation. A real int kernel keeps a 128x128 LUT keyed

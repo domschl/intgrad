@@ -40,6 +40,17 @@ uint8_t  ig_encode_s(float x, float scale);
 float    ig_decode_s(uint8_t code, float scale);
 float    ig_roundtrip_g(float g);     /* roundtrip at the gradient scale */
 
+/* ---- Fixed-point byte grid (hybrid proposal, D6) --------------------
+ * Two's-complement int8 on an absolute step: value = code * fxstep.
+ * Constant ABSOLUTE error fxstep/2 — the right grid for bounded-range
+ * tensors where relative error hurts: logits and the softmax/CE path
+ * (log-grid absolute error there is ~DELTA*|logit| and floors CE loss).
+ * With fxstep=0.1: range ±12.7, CE noise floor ~0.05 nats.
+ */
+void     ig_set_fxstep(float step);   /* default 0.1f */
+float    ig_get_fxstep(void);
+float    ig_fx_roundtrip(float x);    /* clamp+round onto the int8·step grid */
+
 /* Log-domain integer helpers (the "fast path" of the future int kernel): */
 uint8_t  ig_logmul(uint8_t a, uint8_t b);   /* magnitude-domain add with clamp */
 uint8_t  ig_logadd(uint8_t a, uint8_t b);   /* via LUT-style log1p(exp()) identity */

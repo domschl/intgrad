@@ -17,6 +17,11 @@ typedef struct ig_Value {
     int nchildren;
     void (*backprop)(struct ig_Value *self); /* NULL for leaves */
     int _seen;                               /* internal: topo-pass marker */
+    /* Quantization was CLAMPED at the grid edge: d(clamp)/dx = 0 there,
+     * so backprop through this node must be blocked. Without this the
+     * optimizer pushes gradient into an immovable stored value (Momentum
+     * accumulates against a wall — the E4 stuck-loss floor). */
+    unsigned clamped : 1;
 } ig_Value;
 
 /* Toggle quantization on/off (off = exact float mode, used for gradient checks). */
@@ -28,6 +33,13 @@ extern int ig_quant_enabled;
  * float accumulation inside this file emulates an int accumulator; the
  * true int-domain accumulator arrives with the tensor path (M5.5). */
 extern int ig_pure_int;
+
+/* D6 hybrid grid around bounded-range paths (logits/CE):
+ *   0 = log grid (default, everywhere else)
+ *   1 = fixed-point byte grid per op (ig_fx_roundtrip)
+ *   2 = wide accumulator pass-through: op outputs stay exact, emulating an
+ *       int32 GEMM accumulator; the caller requantizes once at the end. */
+extern int ig_fx_mode;
 
 /* Graph arena. ig_reset() frees ALL intermediate values (params must live
  * outside the arena, i.e. created before... no: params use ig_value_persist()). */

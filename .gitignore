@@ -11,6 +11,7 @@ compile_commands.json
 # ---------------------------------------------------------------------------
 data/*
 !data/sample.txt    # small synthetic corpus, authored for this repo (MIT)
+!data/overfit.txt   # tiny memorization probe corpus (MIT)
 .DS_Store
 ._*
 __pycache__/

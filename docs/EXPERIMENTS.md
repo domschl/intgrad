@@ -33,8 +33,64 @@ activations, and — worst — the logsumexp/logit path that computes CE).
 2. The pure-int penalty at this scale is small; the 0.9 bpb gap vs fp is a
    **forward-noise problem**, which no gscale can fix.
 
+## E3 — Memorization probe (`data/overfit.txt`, 240 B)
+
+Can the net drive loss → 0 on data small enough to memorize? Separates
+optimization/quantization floors from generalization.
+
+**Before the clamp-STE fix:** fp 0.008 ✓, but *all* quantized modes stuck
+at ≈ 1.4 nats regardless of gscale/S — suspicious.
+
+## E4 — Attribution ladder + the clamp bug (fixed)
+
+Isolation flags added: `--fp-logits` (float from logits onward),
+`--fp-params` (float parameter storage), `--loss-fp`, plus the D6 hybrid
+grid (fixed-point bytes for logits/CE, exact int32-style GEMM accumulation,
+requantized once per logit).
+
+Finding: float logits changed nothing (1.36 ≈ 1.40) → not the logit grid.
+The real culprit was **STE ignoring the quantizer's clamp region**:
+d(clamp)/dx = 0 outside range, but gradients flowed through saturated
+values — Adam accumulated momentum against immovable stored numbers,
+freezing convergence. With clamp-aware STE (`ig_Value.clamped` masks
+backprop; also fixes softmax weights computed from a clamped LSE):
+
+| config | final loss (3000 steps) |
+|---|---|
+| fp oracle | 0.0000 |
+| full-quant hybrid (log8 acts + fx logits) | **0.0000** |
+| hybrid + pure-int (gscale 2^16) | 0.0000 |
+| fp-logits / fp-params variants | 0.0000 |
+
+Deterministic across repeats and seeds; ASan clean.
+**Conclusion: the byte-quantization scheme does NOT block optimization.
+All previously attributed “quant floors” were the clamp-STE bug.**
+(Transparency note: one intermediate measurement run showed the old floor
+with the clamp fix supposedly in — suspect a stale build in that sequence;
+final numbers are from clean rebuilds and reproducible.)
+
+## E5 — Hybrid grid on the real corpus
+
+Same protocol as E1 (ctx4/nh96/4000 steps, frozen split):
+
+| config | val bpb | Δ vs oracle |
+|---|---|---|
+| fp oracle | 3.42 | — |
+| pure log8 (E1) | 4.30 | 0.89 |
+| **hybrid (D6)** | **4.20** | **0.79** |
+
+Remaining gap interpretation: memorization proves optimization is healthy,
+so the residual gap on dense data is representational (grid noise biasing
+a capacity-limited model), not an optimizer artifact. Both numbers are
+also far above this arch's ceiling (4000 steps, ctx=4 MLP); re-evaluate
+the gap at M3 scale before any constraint-level conclusions.
+
 ## Conclusions / next levers (feeds M3.5)
 
+0. **D6 adopted (hybrid grids, clamp-aware STE mandatory).** Log-byte for
+   weights/activations; fixed-point byte (step 0.1, ±12.7) for logits/CE
+   with one requantization per dot product (int32-style accumulation).
+   Every quantizer clamps AND masks backprop at the clamp (E4).
 1. **Do not chase scales globally.** S and gscale each buy ≤0.05 bpb;
    adopt gscale≈2^16 as the working point for this arch, re-tune per arch.
 2. **Decompose the forward gap** (cheap code change): flags to quantize
