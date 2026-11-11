@@ -51,6 +51,20 @@ void     ig_set_fxstep(float step);   /* default 0.1f */
 float    ig_get_fxstep(void);
 float    ig_fx_roundtrip(float x);    /* clamp+round onto the int8·step grid */
 
+/* ---- E6 capacity probe: per-role grid resolution -------------------
+ * delta is the log-grid's relative step (IG_DELTA default 0.1 ≈ 7.2%).
+ * Halving delta doubles precision but halves the log2-reachable range at
+ * 8 bits — a 16-bit value would get both. ig_rt2(x, delta, scale) is a
+ * generic grid round-trip; roles carry their own knobs (defaults = the
+ * standard byte grid). Setting w-delta≈IG_DELTA/4 emulates ~16-bit weight
+ * storage while activations stay 8-bit (and vice versa).
+ */
+float ig_rt2(float x, float delta, float scale);
+void  ig_set_role_grid(const char *role, float delta, float scale); /* "act"|"w" */
+void  ig_get_role_grid(const char *role, float *delta, float *scale);
+float ig_rt_act(float x);   /* forward-value grid round-trip */
+float ig_rt_w(float x);     /* parameter-storage grid round-trip */
+
 /* Log-domain integer helpers (the "fast path" of the future int kernel): */
 uint8_t  ig_logmul(uint8_t a, uint8_t b);   /* magnitude-domain add with clamp */
 uint8_t  ig_logadd(uint8_t a, uint8_t b);   /* via LUT-style log1p(exp()) identity */

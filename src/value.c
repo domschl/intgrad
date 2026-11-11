@@ -52,7 +52,7 @@ static float qz(float x)
 {
     if (!ig_quant_enabled) return x;
     if (ig_fx_mode == 2) return x; /* int32-accumulator emulation: no requant */
-    return ig_fx_mode ? ig_fx_roundtrip(x) : ig_roundtrip(x);
+    return ig_fx_mode ? ig_fx_roundtrip(x) : ig_rt_act(x);
 }
 
 /* True iff quantizing x would clamp at the grid edge (vs. round normally).
@@ -62,8 +62,9 @@ static int qz_clamped(float x)
     if (!ig_quant_enabled || ig_fx_mode == 2) return 0;
     if (ig_fx_mode == 1)
         return fabsf(x) > 127.0f * ig_get_fxstep();
-    float maxm = (exp2f((float)IG_MAX_CODE * IG_DELTA) - 1.0f) / ig_get_scale();
-    return fabsf(x) > maxm;
+    float d, s;
+    ig_get_role_grid("act", &d, &s);
+    return fabsf(x) > (exp2f((float)IG_MAX_CODE * d) - 1.0f) / s;
 }
 
 static ig_Value *mk(void)

@@ -20,30 +20,49 @@ static float frand01(void)
     return (float)(rng_state >> 8) / 16777216.0f;
 }
 
-ig_MLP *ig_mlp_new(int ctx, int nh, unsigned seed)
+/* Registration order for Adam/checkpoint flat indexing: W1, b1, W2, b2,
+ * W2b, b2b — keep allocation order in sync with mlp_nparams and save2. */
+ig_MLP *ig_mlp_new2(int ctx, int nh, int nh2, unsigned seed)
 {
+    if (ctx < 1 || nh < 1 || nh2 < 0) return NULL;
     ig_MLP *m = calloc(1, sizeof *m);
     if (!m) { fprintf(stderr, "ig: oom\n"); exit(1); }
     rng_state = seed ? seed : 0x9E3779B9u;
     int nin = ctx * IG_VOCAB;
+    int src = nh2 ? nh2 : nh;
 
     m->ctx = ctx;
     m->nh = nh;
+    m->nh2 = nh2;
     m->W1 = malloc(sizeof(ig_Value *) * (size_t)nin * (size_t)nh);
     m->b1 = calloc((size_t)nh, sizeof(ig_Value *));
-    m->W2 = malloc(sizeof(ig_Value *) * (size_t)nh * IG_VOCAB);
+    m->W2 = malloc(sizeof(ig_Value *) * (size_t)src * IG_VOCAB);
     m->b2 = calloc(IG_VOCAB, sizeof(ig_Value *));
-    if (!m->W1 || !m->b1 || !m->W2 || !m->b2) {
+    m->W2b = nh2 ? malloc(sizeof(ig_Value *) * (size_t)nh * nh2) : NULL;
+    m->b2b = nh2 ? calloc((size_t)nh2, sizeof(ig_Value *)) : NULL;
+    if (!m->W1 || !m->b1 || !m->W2 || !m->b2 || (nh2 && (!m->W2b || !m->b2b))) {
         fprintf(stderr, "ig: oom\n");
         exit(1);
     }
     for (long i = 0; i < (long)nin * nh; i++)
         m->W1[i] = ig_value_persist((frand01() * 2.0f - 1.0f) * 0.05f);
     for (int i = 0; i < nh; i++) m->b1[i] = ig_value_persist(0.0f);
-    for (long i = 0; i < (long)nh * IG_VOCAB; i++)
-        m->W2[i] = ig_value_persist((frand01() * 2.0f - 1.0f) * 0.3f);
+    float w2b = 0.3f / sqrtf((float)src);
+    for (long i = 0; i < (long)src * IG_VOCAB; i++)
+        m->W2[i] = ig_value_persist((frand01() * 2.0f - 1.0f) * w2b);
     for (int i = 0; i < IG_VOCAB; i++) m->b2[i] = ig_value_persist(0.0f);
+    if (nh2) {
+        float wb = 0.3f / sqrtf((float)nh);
+        for (long i = 0; i < (long)nh * nh2; i++)
+            m->W2b[i] = ig_value_persist((frand01() * 2.0f - 1.0f) * wb);
+        for (int i = 0; i < nh2; i++) m->b2b[i] = ig_value_persist(0.0f);
+    }
     return m;
+}
+
+ig_MLP *ig_mlp_new(int ctx, int nh, unsigned seed)
+{
+    return ig_mlp_new2(ctx, nh, 0, seed);
 }
 
 void ig_mlp_free(ig_MLP *m)
@@ -52,9 +71,15 @@ void ig_mlp_free(ig_MLP *m)
     int nin = m->ctx * IG_VOCAB;
     for (long i = 0; i < (long)nin * m->nh; i++) ig_value_free_persist(m->W1[i]);
     for (int i = 0; i < m->nh; i++) ig_value_free_persist(m->b1[i]);
-    for (long i = 0; i < (long)m->nh * IG_VOCAB; i++) ig_value_free_persist(m->W2[i]);
+    int src = m->nh2 ? m->nh2 : m->nh;
+    for (long i = 0; i < (long)src * IG_VOCAB; i++) ig_value_free_persist(m->W2[i]);
     for (int i = 0; i < IG_VOCAB; i++) ig_value_free_persist(m->b2[i]);
+    if (m->nh2) {
+        for (long i = 0; i < (long)m->nh * m->nh2; i++) ig_value_free_persist(m->W2b[i]);
+        for (int i = 0; i < m->nh2; i++) ig_value_free_persist(m->b2b[i]);
+    }
     free(m->W1); free(m->b1); free(m->W2); free(m->b2);
+    free(m->W2b); free(m->b2b);
     free(m);
 }
 
@@ -73,6 +98,20 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
         }
         hv[j] = ig_relu(acc);
     }
+    ig_Value **srcv = hv;
+    int nsrc = nh;
+    ig_Value **hv2 = NULL;
+    if (m->nh2) {
+        hv2 = malloc(sizeof(ig_Value *) * (size_t)m->nh2);
+        for (int j = 0; j < m->nh2; j++) {
+            ig_Value *acc = m->b2b[j];
+            for (int i = 0; i < nh; i++)
+                acc = ig_add(acc, ig_mul(hv[i], m->W2b[(size_t)i * m->nh2 + j]));
+            hv2[j] = ig_relu(acc);
+        }
+        srcv = hv2;
+        nsrc = m->nh2;
+    }
     /* D6 hybrid grid: the output/CE path uses the fixed-point byte grid
      * (constant absolute error), since CE noise scales with the ABSOLUTE
      * logit error; the log grid's 7% relative step there floors loss (E3). */
@@ -81,8 +120,8 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
     ig_fx_mode = ig_fp_logits ? 0 : 2; /* exact accumulation (int32 GEMM) */
     for (int k = 0; k < IG_VOCAB; k++) {
         ig_Value *acc = m->b2[k];
-        for (int j = 0; j < nh; j++)
-            acc = ig_add(acc, ig_mul(hv[j], m->W2[(size_t)j * IG_VOCAB + k]));
+        for (int j = 0; j < nsrc; j++)
+            acc = ig_add(acc, ig_mul(srcv[j], m->W2[(size_t)j * IG_VOCAB + k]));
         logits[k] = acc;
     }
     if (!ig_fp_logits) {
@@ -92,6 +131,7 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
     }
     ig_fx_mode = 0;
     ig_quant_enabled = qsav;
+    free(hv2);
     free(hv);
     return logits;
 }
@@ -107,9 +147,17 @@ ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target)
     (void)m;
     int qsav = ig_quant_enabled;
     if (ig_loss_fp || ig_fp_logits) ig_quant_enabled = 0;
-    ig_fx_mode = (ig_loss_fp || ig_fp_logits) ? 0 : 1; /* D6 CE on fx grid */
+    /* CE arithmetic is EXACT (mode 2) over quantized inputs; only the
+     * final CE value is requantized (fx step). Quantizing lse and target
+     * separately is a trap: both saturate the fx grid at the same edge,
+     * so loss = 12.7 - 12.7 = 0 — a confidently WRONG prediction reports
+     * zero loss (the E6 depth-2 "0.09 bpb" artifact). CE itself carries
+     * the error budget and needs no intermediate quantization. */
+    ig_fx_mode = ig_loss_fp || ig_fp_logits ? 0 : 2;
     ig_Value *lse = ig_logsumexp((const ig_Value **)logits, IG_VOCAB);
     ig_Value *loss = ig_sub(lse, logits[target]);
+    /* CE is NOT requantized: it is a transient scalar (never stored), and
+     * clamping it would kill gradient on "very wrong" predictions. */
     ig_fx_mode = 0;
     ig_quant_enabled = qsav;
     return loss;
@@ -122,10 +170,15 @@ static void zero_grad_list(ig_Value **ps, long n)
 
 void ig_mlp_zero_grad(ig_MLP *m)
 {
+    int src = m->nh2 ? m->nh2 : m->nh;
     zero_grad_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh);
     zero_grad_list(m->b1, m->nh);
-    zero_grad_list(m->W2, (long)m->nh * IG_VOCAB);
+    zero_grad_list(m->W2, (long)src * IG_VOCAB);
     zero_grad_list(m->b2, IG_VOCAB);
+    if (m->nh2) {
+        zero_grad_list(m->W2b, (long)m->nh * m->nh2);
+        zero_grad_list(m->b2b, m->nh2);
+    }
 }
 
 static void sgd_list(ig_Value **ps, long n, float lr)
@@ -135,7 +188,7 @@ static void sgd_list(ig_Value **ps, long n, float lr)
         float g = p->grad;
         if (ig_pure_int) g = ig_roundtrip_g(g); /* D1: gradient on the byte grid */
         float v = p->data - lr * g;
-        p->data = (ig_quant_enabled && !ig_fp_params) ? ig_roundtrip(v) : v;
+        p->data = (ig_quant_enabled && !ig_fp_params) ? ig_rt_w(v) : v;
     }
 }
 
@@ -165,20 +218,29 @@ static ig_GradStat stats_list(ig_Value **ps, long n)
 
 ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group)
 {
+    int src = m->nh2 ? m->nh2 : m->nh;
     switch (group) {
     case 0: return stats_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh);
     case 1: return stats_list(m->b1, m->nh);
-    case 2: return stats_list(m->W2, (long)m->nh * IG_VOCAB);
-    default: return stats_list(m->b2, IG_VOCAB);
+    case 2: return stats_list(m->W2, (long)src * IG_VOCAB);
+    case 3: return stats_list(m->b2, IG_VOCAB);
+    case 4: return stats_list(m->W2b, (long)m->nh * m->nh2);
+    case 5: return stats_list(m->b2b, m->nh2);
+    default: { ig_GradStat z = { 0 }; return z; }
     }
 }
 
 void ig_mlp_sgd_update(ig_MLP *m, float lr)
 {
+    int src = m->nh2 ? m->nh2 : m->nh;
     sgd_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh, lr);
     sgd_list(m->b1, m->nh, lr);
-    sgd_list(m->W2, (long)m->nh * IG_VOCAB, lr);
+    sgd_list(m->W2, (long)src * IG_VOCAB, lr);
     sgd_list(m->b2, IG_VOCAB, lr);
+    if (m->nh2) {
+        sgd_list(m->W2b, (long)m->nh * m->nh2, lr);
+        sgd_list(m->b2b, m->nh2, lr);
+    }
 }
 
 static void scale_list(ig_Value **ps, long n, float s)
@@ -188,10 +250,15 @@ static void scale_list(ig_Value **ps, long n, float s)
 
 void ig_mlp_scale_grads(ig_MLP *m, float s)
 {
+    int src = m->nh2 ? m->nh2 : m->nh;
     scale_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh, s);
     scale_list(m->b1, m->nh, s);
-    scale_list(m->W2, (long)m->nh * IG_VOCAB, s);
+    scale_list(m->W2, (long)src * IG_VOCAB, s);
     scale_list(m->b2, IG_VOCAB, s);
+    if (m->nh2) {
+        scale_list(m->W2b, (long)m->nh * m->nh2, s);
+        scale_list(m->b2b, m->nh2, s);
+    }
 }
 
 /* ---------------- Adam ---------------- */
@@ -213,8 +280,11 @@ static void adam_ensure(long total)
 
 static long mlp_nparams(const ig_MLP *m)
 {
-    return (long)m->ctx * IG_VOCAB * m->nh + m->nh
-         + (long)m->nh * IG_VOCAB + IG_VOCAB;
+    int src = m->nh2 ? m->nh2 : m->nh;
+    long n = (long)m->ctx * IG_VOCAB * m->nh + m->nh
+           + (long)src * IG_VOCAB + IG_VOCAB;
+    if (m->nh2) n += (long)m->nh * m->nh2 + m->nh2;
+    return n;
 }
 
 void ig_mlp_adam_reset(void)
@@ -233,10 +303,13 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
     float bc1 = 1.0f - powf(b1, (float)adam_t);
     float bc2 = 1.0f - powf(b2, (float)adam_t);
     long k = 0;
-    ig_Value **lists[4] = { m->W1, m->b1, m->W2, m->b2 };
-    long ns[4] = { (long)m->ctx * IG_VOCAB * m->nh, m->nh,
-                   (long)m->nh * IG_VOCAB, IG_VOCAB };
-    for (int gi = 0; gi < 4; gi++) {
+    int src = m->nh2 ? m->nh2 : m->nh;
+    ig_Value **lists[6] = { m->W1, m->b1, m->W2, m->b2, m->W2b, m->b2b };
+    long ns[6] = { (long)m->ctx * IG_VOCAB * m->nh, m->nh,
+                   (long)src * IG_VOCAB, IG_VOCAB,
+                   (long)m->nh * m->nh2, m->nh2 };
+    int ng = m->nh2 ? 6 : 4;
+    for (int gi = 0; gi < ng; gi++) {
         for (long i = 0; i < ns[gi]; i++) {
             ig_Value *p = lists[gi][i];
             float g = p->grad;
@@ -246,7 +319,7 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
             c->v = b2 * c->v + (1.0f - b2) * g * g;
             float step = lr * (c->m / bc1) / (sqrtf(c->v / bc2) + eps);
             float nv = p->data - step;
-            p->data = (ig_quant_enabled && !ig_fp_params) ? ig_roundtrip(nv) : nv;
+            p->data = (ig_quant_enabled && !ig_fp_params) ? ig_rt_w(nv) : nv;
         }
     }
 }
@@ -261,18 +334,22 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     FILE *f = fopen(tmp, "wb");
     if (!f) { fprintf(stderr, "ig: cannot write %s\n", tmp); return -1; }
     char magic[4] = { 'I', 'G', 'C', 'K' };
-    int vers = 3; /* v2: Adam state, v3: + steps_done & RNG (schedule state) */
+    int vers = 4; /* v2: Adam, v3: +steps/RNG, v4: +nh2 (E6 depth probe) */
     fwrite(magic, 1, 4, f);
     fwrite(&vers, sizeof vers, 1, f);
     fwrite(&m->ctx, sizeof m->ctx, 1, f);
     fwrite(&m->nh, sizeof m->nh, 1, f);
+    if (vers >= 4) fwrite(&m->nh2, sizeof m->nh2, 1, f);
     float s1 = ig_get_scale(), s2 = ig_get_gscale();
     fwrite(&s1, sizeof s1, 1, f);
     fwrite(&s2, sizeof s2, 1, f);
-    ig_Value **lists[4] = { m->W1, m->b1, m->W2, m->b2 };
-    long ns[4] = { (long)m->ctx * IG_VOCAB * m->nh, m->nh,
-                   (long)m->nh * IG_VOCAB, IG_VOCAB };
-    for (int gi = 0; gi < 4; gi++) {
+    int src = m->nh2 ? m->nh2 : m->nh;
+    ig_Value **lists[6] = { m->W1, m->b1, m->W2, m->b2, m->W2b, m->b2b };
+    long ns[6] = { (long)m->ctx * IG_VOCAB * m->nh, m->nh,
+                   (long)src * IG_VOCAB, IG_VOCAB,
+                   (long)m->nh * m->nh2, m->nh2 };
+    int ng = m->nh2 ? 6 : 4;
+    for (int gi = 0; gi < ng; gi++) {
         for (long i = 0; i < ns[gi]; i++) {
             float d = lists[gi][i]->data;
             uint8_t code = ig_encode(d); /* the byte-only view of the model */
@@ -305,13 +382,14 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
     FILE *f = fopen(path, "rb");
     if (!f) { fprintf(stderr, "ig: cannot open %s\n", path); return NULL; }
     char magic[4];
-    int vers, ctx, nh;
+    int vers, ctx, nh, nh2 = 0;
     float s1, s2;
     if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "IGCK", 4) != 0
         || fread(&vers, sizeof vers, 1, f) != 1
-        || (vers != 1 && vers != 2 && vers != 3)
+        || (vers != 1 && vers != 2 && vers != 3 && vers != 4)
         || fread(&ctx, sizeof ctx, 1, f) != 1
         || fread(&nh, sizeof nh, 1, f) != 1
+        || (vers >= 4 && fread(&nh2, sizeof nh2, 1, f) != 1)
         || fread(&s1, sizeof s1, 1, f) != 1
         || fread(&s2, sizeof s2, 1, f) != 1) {
         fprintf(stderr, "ig: bad checkpoint %s\n", path);
@@ -320,11 +398,14 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
     }
     ig_set_scale(s1);
     ig_set_gscale(s2);
-    ig_MLP *m = ig_mlp_new(ctx, nh, 1);
-    ig_Value **lists[4] = { m->W1, m->b1, m->W2, m->b2 };
-    long ns[4] = { (long)ctx * IG_VOCAB * nh, nh,
-                   (long)nh * IG_VOCAB, IG_VOCAB };
-    for (int gi = 0; gi < 4; gi++) {
+    ig_MLP *m = ig_mlp_new2(ctx, nh, nh2, 1);
+    int src = nh2 ? nh2 : nh;
+    ig_Value **lists[6] = { m->W1, m->b1, m->W2, m->b2, m->W2b, m->b2b };
+    long ns[6] = { (long)ctx * IG_VOCAB * nh, nh,
+                   (long)src * IG_VOCAB, IG_VOCAB,
+                   (long)nh * nh2, nh2 };
+    int ng = nh2 ? 6 : 4;
+    for (int gi = 0; gi < ng; gi++) {
         for (long i = 0; i < ns[gi]; i++) {
             float d;
             uint8_t code;
@@ -338,8 +419,7 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
         }
     }
     if (vers >= 2) {
-        adam_ensure((long)ctx * IG_VOCAB * nh + nh
-                    + (long)nh * IG_VOCAB + IG_VOCAB);
+        adam_ensure(mlp_nparams(m));
         if (fread(&adam_t, sizeof adam_t, 1, f) != 1) {
             fprintf(stderr, "ig: ckpt missing adam t\n");
             ig_mlp_free(m);

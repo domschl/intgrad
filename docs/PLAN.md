@@ -279,6 +279,22 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
   bugs is 10× easier with provenance) and still prefer public-domain /
   permissive sources where quality is equal (they're cleaner and stable).
 
+- **D6 — Hybrid quantization grids (user proposal, adopted).** Every value
+  is still one byte (C1 holds); the *grid family* varies by tensor role:
+  log-byte (Δ=0.1) for weights/activations where dynamic range matters,
+  fixed-point byte (step 0.1, range ±12.7) for logits/CE where CE error
+  scales with ABSOLUTE error — plus int32-style exact accumulation inside
+  dot products with one requantization per result (matches real int8 GEMM
+  semantics). Mandatory companion: **clamp-aware STE** — quantizers pass
+  gradient 1:1 in range and 0 in the clamp region (E4: without this,
+  optimizers freeze against saturated values; with it, full-quant
+  memorizes to 0.0000 loss).
+  AMENDMENT (E5c): CE is computed EXACT from quantized logits and is
+  never itself quantized — both lse and target clamp on any grid means a
+  confidently wrong prediction can score loss = 0 (the 0.09-bpb artifact).
+  Error budgets attach to STORED tensors only, never to intermediates of
+  a subtractive identity.
+
 Remaining minor questions (non-blocking, answer anytime):
 
 - **R1** Max tool-result size before truncation/summarization policy

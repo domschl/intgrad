@@ -69,7 +69,28 @@ All previously attributed “quant floors” were the clamp-STE bug.**
 with the clamp fix supposedly in — suspect a stale build in that sequence;
 final numbers are from clean rebuilds and reproducible.)
 
-## E5 — Hybrid grid on the real corpus
+## E5c — CE-metric artifact found & fixed (invalidates E4/E5 numbers)
+
+While running E6 the depth-2 model "reached 0.09 bpb val" — impossible.
+Cause: with lse and target-logit each requantized on the fx grid, both
+saturate at the same edge (12.7) and CE = 12.7 − 12.7 = **0 for
+confidently WRONG predictions**. Fixed: CE arithmetic is exact (mode 2)
+over quantized logits; the CE scalar itself is never quantized (transient,
+not stored; clamping it would also kill gradient on very-wrong calls).
+*Rule extracted: never clamp two operands of a subtraction where 0 is the
+desired outcome — quantify error only at the end of the identity.*
+Corrected headline numbers (4000 steps, split-v0):
+
+| config | val bpb (was, artifact) |
+|---|---|
+| fp oracle (1-layer) | 3.42 |
+| hybrid 1-layer | 4.87 (was 4.20) |
+| hybrid depth-2 | 4.69 |
+| fp oracle depth-2 | 3.65 |
+
+The overfit-probe memorization result (all modes → true 0.0000 CE) stands.
+
+## E5 — Hybrid grid on the real corpus [SUPERSEDED by E5c]
 
 Same protocol as E1 (ctx4/nh96/4000 steps, frozen split):
 
@@ -84,6 +105,20 @@ so the residual gap on dense data is representational (grid noise biasing
 a capacity-limited model), not an optimizer artifact. Both numbers are
 also far above this arch's ceiling (4000 steps, ctx=4 MLP); re-evaluate
 the gap at M3 scale before any constraint-level conclusions.
+
+## E6 — Depth vs bits (user hypothesis: gap = capacity, not noise)
+
+Depth-2 (96→64) at the same 8-bit budget: val 4.69 vs 1-layer 4.87 —
+depth helps the quantized model (+0.19) and *hurts* the fp oracle
+(3.65 vs 3.42), but the quant gap persists (1.0 bpb). Verdict: depth is
+worth having, but does not by itself close the gap at this vehicle scale.
+
+The planned "w16" weight-resolution probe was **invalid**: in
+(symlog) grids the absolute step near x is ≈ (1+|x|s)·ln2·Δ/s — scale and
+delta interact — so Δ/4 at s/256 was actually ~5× coarser near |w|≈0.05
+(val 7.9 — consistent, not a mystery). A true capacity probe needs real
+16-bit storage (ig_encode16), deferred; the role-grid mechanism
+(ig_set_role_grid) is kept — it is the substrate for M4 per-tensor scales.
 
 ## Conclusions / next levers (feeds M3.5)
 

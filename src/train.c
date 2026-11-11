@@ -84,6 +84,8 @@ int main(int argc, char **argv)
     int steps = 2000, ctx = 4, nh = 64, nsample = 0, seed = 42;
     int batch = 1, warmup = 100, eval_every = 0, eval_windows = 512;
     int grad_stats = 0, use_adam = 1, sched_cosine = 1, save_every = 0;
+    int hidden2 = 0;                       /* E6 depth-vs-precision probe */
+    float w_delta = 0, a_delta = 0, w_scale = 0, a_scale = 0;
     float lr = 3e-3f;
 
     for (int i = 1; i < argc; i++) {
@@ -104,6 +106,11 @@ int main(int argc, char **argv)
         OPT("--eval-windows", eval_windows = (int)v)
         OPT("--save-every", save_every = (int)v)
         OPT("--lr", lr = (float)atof(argv[i]))
+        OPT("--hidden2", hidden2 = (int)v)
+        OPT("--w-delta", w_delta = (float)v)
+        OPT("--a-delta", a_delta = (float)v)
+        OPT("--w-scale", w_scale = (float)v)
+        OPT("--a-scale", a_scale = (float)v)
 #undef OPT
         else if (!strcmp(argv[i], "--opt") && i + 1 < argc) {
             const char *o = argv[++i];
@@ -126,6 +133,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--gscale") && i + 1 < argc) ig_set_gscale((float)atof(argv[++i]));
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) ig_set_scale((float)atof(argv[++i]));
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
+    }
+    if (w_delta || w_scale) {
+        float d, s;
+        ig_get_role_grid("w", &d, &s);
+        ig_set_role_grid("w", w_delta ? w_delta : d, w_scale ? w_scale : s);
+    }
+    if (a_delta || a_scale) {
+        float d, s;
+        ig_get_role_grid("act", &d, &s);
+        ig_set_role_grid("act", a_delta ? a_delta : d, a_scale ? a_scale : s);
     }
     if (!path && !index && !load) path = "data/sample.txt";
     rng_state = (uint64_t)seed * 0x9E3779B97F4A7C15ull | 1u;
@@ -153,12 +170,16 @@ int main(int argc, char **argv)
         printf("ig-train: resumed %s (ctx=%d nh=%d) at step %ld\n",
                load, ctx, nh, start_step);
     } else {
-        m = ig_mlp_new(ctx, nh, (unsigned)seed);
+        m = ig_mlp_new2(ctx, nh, hidden2, (unsigned)seed);
     }
-    printf("ig-train: ctx=%d hidden=%d quant=%s pure-int=%d opt=%s params=%d\n",
-           ctx, nh, ig_quant_enabled ? "log8" : "off", ig_pure_int,
-           use_adam ? "adam" : "sgd",
-           ctx * IG_VOCAB * nh + nh + nh * IG_VOCAB + IG_VOCAB);
+    {
+        int src2 = m->nh2 ? m->nh2 : m->nh;
+        long np = (long)ctx * IG_VOCAB * nh + nh + (long)src2 * IG_VOCAB + IG_VOCAB;
+        if (m->nh2) np += (long)nh * m->nh2 + m->nh2;
+        printf("ig-train: ctx=%d hidden=%d,%d quant=%s pure-int=%d opt=%s params=%ld\n",
+               ctx, nh, m->nh2, ig_quant_enabled ? "log8" : "off", ig_pure_int,
+               use_adam ? "adam" : "sgd", np);
+    }
 
     clock_t t0 = clock();
     for (long step = start_step; step < steps; step++) {
@@ -193,8 +214,8 @@ int main(int argc, char **argv)
         }
         if (batch > 1) ig_mlp_scale_grads(m, 1.0f / (float)batch);
         if (grad_stats && step % 500 == 0) {
-            static const char *names[4] = { "W1", "b1", "W2", "b2" };
-            for (int gi = 0; gi < 4; gi++) {
+            static const char *names[6] = { "W1", "b1", "W2", "b2", "W2b", "b2b" };
+            for (int gi = 0; gi < (m->nh2 ? 6 : 4); gi++) {
                 ig_GradStat gs = ig_mlp_grad_stats(m, gi);
                 printf("  grads[%s] mean|g|=%.3e max|g|=%.3e collapse=%.2f%% sat=%.2f%%\n",
                        names[gi], gs.mean_abs, gs.max_abs,

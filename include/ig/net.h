@@ -12,13 +12,17 @@
 
 typedef struct {
     int ctx, nh;
+    int nh2;                /* optional second hidden layer width (E6), 0=off */
     ig_Value **W1; /* [ctx * IG_VOCAB * nh] */
     ig_Value **b1; /* [nh] */
-    ig_Value **W2; /* [nh * IG_VOCAB] */
+    ig_Value **W2; /* [src * IG_VOCAB], src = nh2 ? nh2 : nh */
     ig_Value **b2; /* [IG_VOCAB] */
+    ig_Value **W2b;/* [nh * nh2] (only when nh2 > 0) */
+    ig_Value **b2b;/* [nh2] */
 } ig_MLP;
 
 ig_MLP *ig_mlp_new(int ctx, int nh, unsigned seed);
+ig_MLP *ig_mlp_new2(int ctx, int nh, int nh2, unsigned seed);
 void    ig_mlp_free(ig_MLP *m);
 
 /* Forward on ctx bytes, returns malloc'd logits[IG_VOCAB] (graph nodes). */
