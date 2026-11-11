@@ -43,6 +43,24 @@ Builder: `tools/build_shards.py` (uv, PEP 723 → pulls lxml). Guarantees:
 Shard format: raw UTF-8 byte streams, docs joined by `\n \n`, 64 MB shards
 (mmap-friendly, GPT-2 style shuffle-at-shard-granularity later).
 
+## corpus-v1-wiki build (done)
+
+```sh
+uv run tools/build_shards.py --out data/corpus-v1-wiki \
+    --wiki-xml de=$CORPORA/Wikipedia/dewiki-20151002-pages-articles.xml.bz2.bak \
+    --wiki-xml en=$CORPORA/Wikipedia/enwiki-20151002-pages-articles.xml.bak \
+    --min-doc-bytes 300
+```
+
+| Metric | Value |
+|--------|-------|
+| Articles kept | **5,562,134** (en 3,871,622 · de 1,690,512) |
+| Size | 18.6 GB, 278 shards |
+| Rejected | 1.02 M stubs (< 300 B), 767 exact dups; redirects/disambigs/ns!=0 filtered at parse |
+| Manifest verify | 5.56 M docs checked, **0 problems** |
+| Protocol-byte scan | 0 marker bytes in sampled shards |
+| Runtime | ~25 min total (de 5.5 GB + en 13 GB) |
+
 ## Next data moves (in order)
 
 1. ~~Write `--wiki-xml` adapter~~ **DONE** — full enwiki+dewiki 2015 dumps
