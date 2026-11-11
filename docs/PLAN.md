@@ -152,7 +152,8 @@ tool-behavior live.
    (default generation teacher), Gemma4 12/26/31 B for cross-checking
    (judge / rejection sampling), EmbeddingGemma for dedup, clustering and
    near-duplicate exclusion. `tools/gen_traces.py` drives it; more models
-   can be dropped into the server presets as needed.
+   can be dropped into the server presets as needed. Invocation follows the
+   repo's uv convention: `uv run tools/gen_traces.py` (PEP 723, stdlib-only).
 
 ### 4.6 Input conv stem for multibyte UTF-8 (D4 design answer)
 

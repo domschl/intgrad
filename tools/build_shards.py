@@ -1,5 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
+# dependencies = ["lxml>=4.9"]
 # ///
 """build_shards.py — dataset builder: raw text sources -> intgrad byte shards.
 
@@ -21,6 +22,10 @@ Sources (add more adapters as needed):
                         + language-detected               src kind: gutenberg
   --corpus-dir DIR      one doc per .txt file             src kind: textcorpus
   --wiki-defs FILE      "Title ||| definition" line dump  src kind: wiki2017
+  --wiki-xml LANG=PATH  MediaWiki pages-articles dump     src kind: wikixml
+                        (bz2 auto-detected; repeatable, e.g.
+                        --wiki-xml en=..xml.bak --wiki-xml de=..bz2.bak)
+  --max-docs N          stop after N accepted docs (sample runs)
 
 Language filter: --langs en,de,fr,es,it,pt,nl (default); "unk" keeps
 unknown-language docs too. Detection = function-word scoring over the first
@@ -142,6 +147,107 @@ def doc_from_wiki_line(line: bytes) -> bytes | None:
     return title.strip() + b": " + body
 
 
+import re
+
+_RE = {
+    "comment": re.compile(r"<!--.*?-->", re.S),
+    "pre": re.compile(r"<(nowiki|source|pre|code|syntaxhighlight)\b.*?</\1>", re.S | re.I),
+    "ref_self": re.compile(r"<ref\b[^>]*?/>", re.S),
+    "ref": re.compile(r"<ref\b.*?</ref>", re.S | re.I),
+    "gallery": re.compile(r"<(img|gallery|imagemap|timeline)[^>]*?>.*?</\1>", re.S | re.I),
+    "table": re.compile(r"^\s*\{\|.*?^\s*\|\}\s*", re.S | re.M),
+    "tmpl": re.compile(r"\{\{[^{}]*\}\}"),
+    "brolink": re.compile(
+        r"\[\[(?:File|Image|Category|MediaWiki|Special|Talk|Wikipedia|Help"
+        r"|Portal|Template|Draft|User|Media|Benutzer|Diskussion|Datei|Kategorie)"
+        r":[^\]]*\]\]", re.I),
+    "ext_named": re.compile(r"\[(?:https?|ftp)://\S+ +([^\]]+)\]"),
+    "ext_bare": re.compile(r"\[(?:https?|ftp)://[^\]]+\]"),
+    "link_named": re.compile(r"\[\[[^\[\]|]*\|([^\[\]]*)\]\]"),
+    "link_plain": re.compile(r"\[\[([^\[\]]*)\]\]"),
+    "heading": re.compile(r"^={2,6}\s*(.*?)\s*={2,6}\s*$", re.M),
+    "listmark": re.compile(r"^[*#:;\s]+", re.M),
+    "magic": re.compile(r"__[A-Za-z]+__"),
+    "tags": re.compile(r"</?[a-zA-Z][^>]*>"),
+    "straybr": re.compile(r"\[\[|\]\]"),
+    "hws": re.compile(r"[ \t]+"),
+    "nbs": re.compile(r"\n{3,}"),
+}
+
+
+def strip_wiki(t: str) -> str:
+    """MediaWiki markup -> plain prose. v1 stripper: tuned for readability
+    of the result, not spec completeness."""
+    t = _RE["comment"].sub(" ", t)
+    t = _RE["pre"].sub(" ", t)
+    t = _RE["ref_self"].sub(" ", t)
+    t = _RE["ref"].sub(" ", t)
+    t = _RE["gallery"].sub(" ", t)
+    t = _RE["table"].sub(" ", t)
+    prev = None
+    while prev != t:            # innermost-out removal of nested templates
+        prev = t
+        t = _RE["tmpl"].sub(" ", t)
+    t = _RE["brolink"].sub(" ", t)
+    t = _RE["ext_named"].sub(r"\1", t)
+    t = _RE["ext_bare"].sub(" ", t)
+    t = _RE["link_named"].sub(r"\1", t)
+    t = _RE["link_plain"].sub(r"\1", t)
+    t = _RE["heading"].sub(r"\1", t)
+    t = _RE["listmark"].sub("", t)
+    t = _RE["magic"].sub(" ", t)
+    t = t.replace("'''", "").replace("''", "")
+    t = _RE["tags"].sub(" ", t)
+    t = _RE["straybr"].sub(" ", t)   # orphan [[ / ]] from malformed nesting
+    t = _RE["hws"].sub(" ", t)
+    t = _RE["nbs"].sub("\n\n", t)
+    return t.strip()
+
+
+def _is_disambig(title: str, raw: str) -> bool:
+    if title.lower().endswith("(disambiguation)"):
+        return True
+    head = raw[:1500]
+    return ("__DISAMBIG" in head.upper()
+            or "may refer to" in head.lower()
+            or "kann sich beziehen" in head.lower())
+
+
+def iter_wiki_xml(lang: str, path: str):
+    """Streaming MediaWiki dump -> plain-text articles (ns0 only, no
+    redirects, no disambiguation pages). XML entities decoded by parser.
+    src field embeds the language: 'LANG|||file:title'."""
+    import bz2
+    from lxml import etree
+
+    with open(path, "rb") as probe:
+        is_bz2 = probe.read(3) == b"BZh"
+    opener = bz2.open if is_bz2 else open
+    ns = "{http://www.mediawiki.org/xml/export-0.10/}"
+    with opener(path, "rb") as fh:  # type: ignore[operator]
+        context = etree.iterparse(fh, events=("end",), tag=ns + "page",
+                                  huge_tree=True, recover=True)
+        for _, page in context:
+            ns_el = page.find(ns + "ns")
+            title_el = page.find(ns + "title")
+            rev = page.find(ns + "revision")
+            text_el = None if rev is None else rev.find(ns + "text")
+            raw = (text_el.text if text_el is not None else None) or ""
+            title = (title_el.text if title_el is not None else "") or ""
+            skip = (ns_el is None or (ns_el.text or "0").strip() != "0"
+                    or page.find(ns + "redirect") is not None)
+            page.clear()
+            while page.getprevious() is not None:  # free memory as we go
+                del page.getparent()[0]
+            if skip or _is_disambig(title, raw):
+                continue
+            prose = strip_wiki(raw)
+            if not prose:
+                continue
+            doc = sanitize(prose.encode("utf-8"))
+            yield doc, f"{lang}|||{Path(path).name}:{title}", "wikixml"
+
+
 def iter_gutenberg(root: Path):
     for fp in sorted(root.rglob("*.txt")):
         try:
@@ -154,6 +260,9 @@ def iter_gutenberg(root: Path):
 
 
 def iter_docs(args):
+    for spec in args.wiki_xml:
+        lang, _, path = spec.partition("=")
+        yield from iter_wiki_xml(lang, path)
     if args.wiki_defs:
         p = Path(args.wiki_defs)
         with open(p, "rb") as f:
@@ -173,9 +282,45 @@ def iter_docs(args):
                 yield sanitize(to_utf8(fp.read_bytes())), str(fp), "textcorpus"
 
 
+def verify(out: Path) -> dict:
+    """Re-open every written shard and validate manifest offsets: each doc
+    slice must be non-empty, not start with the separator, and docs must be
+    exactly SEP-joined with the last one ending at EOF."""
+    problems, docs = 0, 0
+    with open(out / "manifest.jsonl", encoding="utf-8") as mf:
+        for line in mf:
+            rec = json.loads(line)
+            data = (out / rec["shard"]).read_bytes()
+            if len(data) != rec["bytes"]:
+                print(f"VERIFY FAIL {rec['shard']}: size mismatch",
+                      file=sys.stderr)
+                problems += 1
+            dlist = rec["docs"]
+            for i, d in enumerate(dlist):
+                docs += 1
+                doc = data[d["off"]:d["off"] + d["len"]]
+                if not doc or doc.startswith(SEP) or doc[:1] in (b"\n", b" "):
+                    print(f"VERIFY FAIL {rec['shard']}#{i}: bad doc start",
+                          file=sys.stderr)
+                    problems += 1
+                end = d["off"] + d["len"]
+                if i + 1 < len(dlist):
+                    nxt = dlist[i + 1]
+                    if data[end:end + len(SEP)] != SEP or nxt["off"] != end + len(SEP):
+                        print(f"VERIFY FAIL {rec['shard']}#{i}: gap",
+                              file=sys.stderr)
+                        problems += 1
+                elif end != len(data):
+                    print(f"VERIFY FAIL {rec['shard']}: trailing gap",
+                          file=sys.stderr)
+                    problems += 1
+    return {"docs_verified": docs, "problems": problems}
+
+
 def build(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    (out / "manifest.jsonl").write_text("")  # idempotent re-runs
     shard_i = 0
     buf = bytearray()
     docs_in_shard: list[dict] = []
@@ -206,6 +351,8 @@ def build(args):
             continue
         if kind == "wiki2017":
             lang = "en"  # English Wikipedia 2017 definitions dump
+        elif kind == "wikixml":
+            lang = src.split("|||", 1)[0]  # declared by --wiki-xml LANG=PATH
         else:
             lang = detect_lang(doc)
         if lang not in allowed:
@@ -218,9 +365,9 @@ def build(args):
         seen.add(h)
         if len(buf) + len(SEP) + len(doc) > args.shard_bytes and buf:
             flush_shard()
-        off = len(buf)
         if buf:
             buf += SEP
+        off = len(buf)  # AFTER the separator: off points at the doc itself
         buf += doc
         docs_in_shard.append({"off": off, "len": len(doc), "src": src,
                               "lang": lang})
@@ -229,12 +376,17 @@ def build(args):
         stats["by_kind"][kind] = stats["by_kind"].get(kind, 0) + 1
         stats.setdefault("by_lang", {})
         stats["by_lang"][lang] = stats["by_lang"].get(lang, 0) + 1
+        if args.max_docs and stats["docs_out"] >= args.max_docs:
+            break
     flush_shard()
 
+    stats["verify"] = verify(out)
     (out / "dataset.json").write_text(json.dumps(
         {"version": 0, "created": int(time.time()),
          "separator": SEP.decode(), "stats": stats}, indent=2) + "\n")
     print(json.dumps(stats, indent=2))
+    if stats["verify"]["problems"]:
+        sys.exit(1)
 
 
 def main():
@@ -244,7 +396,11 @@ def main():
     ap.add_argument("--gutenberg-tree")
     ap.add_argument("--corpus-dir")
     ap.add_argument("--wiki-defs")
+    ap.add_argument("--wiki-xml", action="append", default=[],
+                    metavar="LANG=PATH",
+                    help="MediaWiki pages-articles dump (repeatable)")
     ap.add_argument("--langs", default="en,de,fr,es,it,pt,nl")
+    ap.add_argument("--max-docs", type=int, default=0)
     ap.add_argument("--shard-bytes", type=int, default=64 << 20)
     ap.add_argument("--min-doc-bytes", type=int, default=64)
     build(ap.parse_args())

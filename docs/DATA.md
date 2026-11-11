@@ -27,7 +27,7 @@ uv run tools/build_shards.py \
     --langs en,de,fr,es,it,pt,nl
 ```
 
-Guarantees of the builder (`tools/build_shards.py`):
+Builder: `tools/build_shards.py` (uv, PEP 723 → pulls lxml). Guarantees:
 * **Protocol-safe payload (D2):** all C0 control bytes except `\t`/`\n`
   stripped (this includes every ESC-marker byte); `\r` normalized to `\n`.
 * **Encoding normalized:** ascii/latin-1/cp1252 → UTF-8 (byte-level model
@@ -45,9 +45,15 @@ Shard format: raw UTF-8 byte streams, docs joined by `\n \n`, 64 MB shards
 
 ## Next data moves (in order)
 
-1. **Full Wikipedia articles** (en → de): write `--wiki-xml` adapter for
-   the local 2015 dumps (strip markup/templates/redirs). This is the
-   biggest single upgrade over definitions-only.
+1. ~~Write `--wiki-xml` adapter~~ **DONE** — full enwiki+dewiki 2015 dumps
+   → `data/corpus-v1-wiki/` (adapter: ns0 only, no redirects/disambigs,
+   template/table/ref/link stripping, bz2 auto-detect, `LANG=PATH` specs,
+   post-build manifest `verify` step must report `problems: 0`).
+   Known v1 stripper artifacts: rare `[ ]` residues, template-glitch word
+   joins — acceptable at scale; improve if val-bpb stalls.
+   NOTE: corpus-v0 manifests were built with an off-by-SEP doc-offset bug
+   (fixed later in the same session); v0 *content* is fine for random-byte
+   training, rebuild `data/corpus-v0` before relying on its doc boundaries.
 2. **Multilingual Latin corpus v1**: PG mirror already carries de/fr/es/it/
    pt/nl books (detector keeps them); optionally add FineWeb-2 / OSCAR
    slices via `uv run --with datasets …` when prose diversity beyond
