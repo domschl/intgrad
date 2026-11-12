@@ -20,3 +20,5 @@ data/*
 ._*
 __pycache__/
 .venv/
+build-cuda/
+tools/gemm_probe_cuda

@@ -37,6 +37,7 @@
 
 #include "ig/data.h"
 #include "ig/dataset.h"
+#include "ig/lingrid.h"
 #include "ig/logquant.h"
 #include "ig/net.h"
 #include "ig/value.h"
@@ -98,6 +99,7 @@ int main(int argc, char **argv)
     int steps = 2000, ctx = 4, nh = 64, nsample = 0, seed = 42;
     int batch = -1, warmup = 100, eval_every = 0, eval_windows = 512;
     int grad_stats = 0, opt = 2 /* 0 sgd, 1 adam, 2 lion (default, D8) */, sched_cosine = 1, save_every = 0;
+    int wgrid = IG_WGRID_LOG, agrid = IG_AGRID_LOG; /* E-E1 grid choice */
     int hidden2 = 0;                       /* E6 depth-vs-precision probe */
     float w_delta = 0, a_delta = 0, w_scale = 0, a_scale = 0;
     float lr = -1.0f;   /* -1: optimizer default (D8): lion 2e-3, adam/sgd 3e-3 */
@@ -158,6 +160,19 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--w2")) ig_w2 = 1; /* default; kept for E8 repro */
         else if (!strcmp(argv[i], "--w1")) ig_w2 = 0;
         else if (!strcmp(argv[i], "--w2-sr")) ig_w2_sr = 1;
+        else if (!strcmp(argv[i], "--wgrid") && i + 1 < argc) {
+            const char *q = argv[++i];
+            if (!strcmp(q, "log")) wgrid = IG_WGRID_LOG;
+            else if (!strcmp(q, "lin-pc")) wgrid = IG_WGRID_LIN_PC;
+            else if (!strcmp(q, "lin-pt")) wgrid = IG_WGRID_LIN_PT;
+            else { fprintf(stderr, "bad --wgrid %s (log|lin-pc|lin-pt)\n", q); return 2; }
+        }
+        else if (!strcmp(argv[i], "--agrid") && i + 1 < argc) {
+            const char *q = argv[++i];
+            if (!strcmp(q, "log")) agrid = IG_AGRID_LOG;
+            else if (!strcmp(q, "lin")) agrid = IG_AGRID_LIN;
+            else { fprintf(stderr, "bad --agrid %s (log|lin)\n", q); return 2; }
+        }
         else if (!strcmp(argv[i], "--grad-stats")) grad_stats = 1;
         else if (!strcmp(argv[i], "--gscale") && i + 1 < argc) {
             ig_set_gscale((float)atof(argv[++i]));
@@ -236,9 +251,24 @@ int main(int argc, char **argv)
             printf("ig-train: %s", opt == 1 ? "adam" : "sgd");
         }
         printf(" lr=%g batch=%d wd=%g\n", lr, batch, ig_wd);
-        if (0) {
-        }
+        if (wgrid != IG_WGRID_LOG || agrid != IG_AGRID_LOG)
+            printf("ig-train: E-E1 grids: weights=%s activations=%s"
+                   " (master weights full-precision, requant on use)\n",
+                   wgrid == IG_WGRID_LIN_PC ? "int8 per-channel"
+                   : wgrid == IG_WGRID_LIN_PT ? "int8 per-tensor" : "log8",
+                   agrid == IG_AGRID_LIN ? "int8 per-tensor (EMA absmax)" : "log8");
     }
+    ig_wgrid_mode = wgrid;
+    ig_agrid_mode = agrid;
+    /* Group geometry for the linear weight scales (E-E1):
+     *  -1*rowlen = channels are columns, +rowlen = channels are rows,
+     *   0 = one scale for the whole tensor. */
+    int srcG = m->nh2 ? m->nh2 : m->nh;
+    void *baseG[6] = { m->W1, m->b1, m->W2, m->b2, m->W2b, m->b2b };
+    long cntG[6] = { (long)ctx * IG_VOCAB * nh, nh,
+                     (long)srcG * IG_VOCAB, IG_VOCAB,
+                     (long)nh * m->nh2, m->nh2 };
+    long strG[6] = { -(long)nh, 0, IG_VOCAB, 0, (long)m->nh2, 0 };
 
     clock_t t0 = clock();
     for (long step = start_step; step < steps; step++) {
@@ -283,6 +313,10 @@ int main(int argc, char **argv)
                        100.0 * gs.sat_frac, 100.0 * gs.sat_mass);
             }
         }
+        /* E-E1: quantization scales come from the current master weights,
+         * refreshed once per step (after backward), so they are constant
+         * across a step exactly as a kernel's scales are. */
+        ig_lin_refresh_w(baseG, cntG, strG, m->nh2 ? 6 : 4);
         if (opt == 2) ig_mlp_lion_update(m, lr_t);
         else if (opt == 1) ig_mlp_adam_update(m, lr_t);
         else ig_mlp_sgd_update(m, lr_t);

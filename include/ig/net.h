@@ -19,6 +19,10 @@ typedef struct {
     ig_Value **b2; /* [IG_VOCAB] */
     ig_Value **W2b;/* [nh * nh2] (only when nh2 > 0) */
     ig_Value **b2b;/* [nh2] */
+    /* Group index handed to the linear-grid scales (E-E1): W1=0, b1=1,
+     * W2=2, b2=3, W2b=4, b2b=5. Kept on the model so the forward pass can
+     * quantize a master weight without searching the group table. */
+    int gbase[6];
 } ig_MLP;
 
 ig_MLP *ig_mlp_new(int ctx, int nh, unsigned seed);

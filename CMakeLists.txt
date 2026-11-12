@@ -13,6 +13,7 @@ set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native")
 
 add_library(intgrad
   src/logquant.c
+  src/lingrid.c
   src/value.c
   src/net.c
   src/data.c

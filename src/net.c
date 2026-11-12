@@ -5,7 +5,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ig/lingrid.h"
 #include "ig/logquant.h"
+
+/* E-E1: hardware-linear grids on the forward path. When set, parameters
+ * keep a full-precision master value and the *forward* consumes
+ * q(w) = int8-rounded (per-channel for weights, per-tensor for
+ * activations) -- the semantics a tensor-core/AMX/VNNI kernel really
+ * evaluates. Log mode leaves all of these as the identity. */
+static int lin_w(void) { return ig_quant_enabled && ig_wgrid_mode != IG_WGRID_LOG; }
+static int lin_a(void) { return ig_quant_enabled && ig_agrid_mode == IG_AGRID_LIN; }
+
+/* forward view of a master weight: gi = group, idx = index in group,
+ * g = the parameter node (log mode reads its high-byte value). */
+static inline float wview(int gi, long idx, ig_Value *g) {
+    return lin_w() ? ig_qw_gi(gi, idx) : g->data;
+}
+/* forward view of an activation (linear grid is a no-op in log mode) */
+static inline float aview(int slot, ig_Value *v) {
+    return lin_a() ? ig_qa(slot, v->data) : v->data;
+}
 
 int ig_fp_params = 0; /* diagnostic: params stored float (no grid round-trip
                        * on update): isolates parameter-grid cost from the
@@ -42,10 +61,24 @@ void ig_mlp_update_stats(long *n, long *subgrid, long *moved, int reset)
 /* Store an updated parameter: grid round-trip (SR by default) + stats.
  * "subgrid" = |step| below half the local grid spacing, i.e. an update
  * that round-to-nearest would silently discard. */
-static void store_param(ig_Value *p, float step)
+static void store_param(ig_Value *p, float step, int gi, long idx)
 {
     float old = p->data;
     if (!ig_quant_enabled || ig_fp_params) { p->data = old - step; return; }
+    if (lin_w()) {
+        /* E-E1: the engine keeps master weights at full precision and
+         * requantizes on use (forward), so nothing is rounded here. This
+         * is exactly why D7's two-byte accumulator is a log-grid artifact:
+         * an int8 GEMM engine never stores the weight as the grid. */
+        p->data = old - step;
+        if (step != 0.0f) {
+            float half = 0.5f * ig_wq_step(gi, idx);
+            st_n++;
+            if (fabsf(step) < half) st_subgrid++;
+            if (p->data != old) st_moved++;
+        }
+        return;
+    }
     int moved;
     if (ig_w2) {
         /* Two-byte weight: the update lands in the 16-bit master code;
@@ -139,6 +172,8 @@ ig_MLP *ig_mlp_new2(int ctx, int nh, int nh2, unsigned seed)
             m->W2b[i] = ig_value_persist((frand01() * 2.0f - 1.0f) * wb);
         for (int i = 0; i < nh2; i++) m->b2b[i] = ig_value_persist(0.0f);
     }
+    m->gbase[0] = 0; m->gbase[1] = 1; m->gbase[2] = 2;
+    m->gbase[3] = 3; m->gbase[4] = 4; m->gbase[5] = 5;
     return m;
 }
 
@@ -177,26 +212,42 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
      * versions re-rounded every partial sum on the log grid, which swamps
      * terms below ~3.5% of the running sum and is order-dependent. */
     ig_fx_mode = 2;
+    int lw = lin_w();
     /* One-hot inputs: only the active byte per position contributes. */
+    float amax0 = 0.0f;
     for (int j = 0; j < nh; j++) {
         ig_Value *acc = m->b1[j];
         for (int p = 0; p < m->ctx; p++) {
-            ig_Value *w = m->W1[(size_t)(p * IG_VOCAB + in[p]) * nh + j];
+            long widx = (long)(p * IG_VOCAB + in[p]) * nh + j;
+            ig_Value *w = m->W1[widx];
+            if (lw) w = ig_value(wview(0, widx, w)); /* W1 is a lookup: int8 weight */
             acc = ig_add(acc, w); /* x_i == 1, so plain add; grad d/dW = 1 */
         }
-        hv[j] = ig_relu(ig_requant(acc, IG_GRID_ACT)); /* relu of a grid value stays on grid */
+        ig_Value *h = ig_relu(ig_requant(acc, IG_GRID_ACT));
+        if (lin_a()) { if (h->data > amax0) amax0 = h->data; h = ig_value(aview(0, h)); }
+        hv[j] = h; /* relu of a grid value stays on grid */
     }
+    if (lin_a()) ig_aobserve(0, amax0);
     ig_Value **srcv = hv;
     int nsrc = nh;
     ig_Value **hv2 = NULL;
     if (m->nh2) {
         hv2 = malloc(sizeof(ig_Value *) * (size_t)m->nh2);
+        float amax1 = 0.0f;
         for (int j = 0; j < m->nh2; j++) {
             ig_Value *acc = m->b2b[j];
-            for (int i = 0; i < nh; i++)
-                acc = ig_add(acc, ig_mul(hv[i], m->W2b[(size_t)i * m->nh2 + j]));
-            hv2[j] = ig_relu(ig_requant(acc, IG_GRID_ACT));
+            for (int i = 0; i < nh; i++) {
+                long widx = (long)i * m->nh2 + j;
+                ig_Value *w = lw ? ig_value(wview(4, widx, m->W2b[widx])) : m->W2b[widx];
+                ig_Value *a = hv[i];
+                if (lin_a()) a = ig_value(aview(0, a));
+                acc = ig_add(acc, ig_mul(a, w));
+            }
+            ig_Value *h = ig_relu(ig_requant(acc, IG_GRID_ACT));
+            if (lin_a()) { if (h->data > amax1) amax1 = h->data; h = ig_value(aview(1, h)); }
+            hv2[j] = h;
         }
+        if (lin_a()) ig_aobserve(1, amax1);
         srcv = hv2;
         nsrc = m->nh2;
     }
@@ -207,8 +258,13 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
     if (ig_fp_logits) ig_quant_enabled = 0; /* isolation: float logits */
     for (int k = 0; k < IG_VOCAB; k++) {
         ig_Value *acc = m->b2[k];
-        for (int j = 0; j < nsrc; j++)
-            acc = ig_add(acc, ig_mul(srcv[j], m->W2[(size_t)j * IG_VOCAB + k]));
+        for (int j = 0; j < nsrc; j++) {
+            long widx = (long)j * IG_VOCAB + k;
+            ig_Value *w = lw ? ig_value(wview(2, widx, m->W2[widx])) : m->W2[widx];
+            ig_Value *a = srcv[j];
+            if (lin_a()) a = ig_value(aview(m->nh2 ? 1 : 0, a));
+            acc = ig_add(acc, ig_mul(a, w));
+        }
         logits[k] = ig_requant(acc, IG_GRID_FX); /* single requantization per logit */
     }
     ig_fx_mode = 0;
@@ -263,13 +319,13 @@ void ig_mlp_zero_grad(ig_MLP *m)
     }
 }
 
-static void sgd_list(ig_Value **ps, long n, float lr)
+static void sgd_list(ig_Value **ps, long n, float lr, int gi)
 {
     float gs = ig_pure_int ? group_gscale(ps, n) : 0.0f;
     for (long i = 0; i < n; i++) {
         ig_Value *p = ps[i];
         float g = grad_q(p->grad, gs); /* D1: gradient on the byte grid */
-        store_param(p, lr * g);
+        store_param(p, lr * g, gi, i);
     }
 }
 
@@ -322,13 +378,13 @@ ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group)
 void ig_mlp_sgd_update(ig_MLP *m, float lr)
 {
     int src = m->nh2 ? m->nh2 : m->nh;
-    sgd_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh, lr);
-    sgd_list(m->b1, m->nh, lr);
-    sgd_list(m->W2, (long)src * IG_VOCAB, lr);
-    sgd_list(m->b2, IG_VOCAB, lr);
+    sgd_list(m->W1, (long)m->ctx * IG_VOCAB * m->nh, lr, 0);
+    sgd_list(m->b1, m->nh, lr, 1);
+    sgd_list(m->W2, (long)src * IG_VOCAB, lr, 2);
+    sgd_list(m->b2, IG_VOCAB, lr, 3);
     if (m->nh2) {
-        sgd_list(m->W2b, (long)m->nh * m->nh2, lr);
-        sgd_list(m->b2b, m->nh2, lr);
+        sgd_list(m->W2b, (long)m->nh * m->nh2, lr, 4);
+        sgd_list(m->b2b, m->nh2, lr, 5);
     }
 }
 
@@ -414,7 +470,7 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
             c->v = b2 * c->v + (1.0f - b2) * g * g;
             float step = lr * ((c->m / bc1) / (sqrtf(c->v / bc2) + eps)
                                + ig_wd * p->data);
-            store_param(p, step);
+            store_param(p, step, gi, i);
         }
     }
 }
@@ -497,7 +553,7 @@ void ig_mlp_lion_update(ig_MLP *m, float lr)
             float mo = lion_m[k + i];
             float c = b1 * mo + (1.0f - b1) * g;
             float u = c > 0.0f ? 1.0f : (c < 0.0f ? -1.0f : 0.0f);
-            store_param(p, lr * (u + ig_wd * p->data));
+            store_param(p, lr * (u + ig_wd * p->data), gi, i);
             float mn = b2 * mo + (1.0f - b2) * g;
             lion_tmp[i] = mn;
             if (fabsf(mn) > mx) mx = fabsf(mn);
