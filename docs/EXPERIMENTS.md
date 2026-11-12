@@ -4,6 +4,17 @@ Byte-level LM, `ctx=4, hidden=96, batch=4, lr=5e-3, warmup=200, cosine,
 4000 steps, seed 42`, evaluated as val bpb on the frozen split-v0
 (800 windows; test in parens). Unigram floor: **4.74**.
 
+> **Current defaults (D7):** two-byte weights (16-bit master code, the
+> forward pass reads the high byte), low byte round-to-nearest; pure-int
+> gradients use a per-tensor pow2 absmax scale. See E7 → E8.
+>
+> **Read E7 first.** Every quantized number in E1–E6 was measured with
+> round-to-nearest parameter storage, which discarded ~98% of all weight
+> updates. The *interpretations* in E1, E2, E5, E5c and E6 ("forward
+> noise", "representational gap", "gscale 2^16 best", "depth helps quant")
+> are invalid; the bug-fix findings of E4 (clamp STE) and E5c (CE
+> saturation artifact) stand.
+
 ## E1 — Value-scale sweep, fake-quant mode (`--scale S`)
 
 | config | val bpb | notes |
@@ -120,27 +131,166 @@ delta interact — so Δ/4 at s/256 was actually ~5× coarser near |w|≈0.05
 16-bit storage (ig_encode16), deferred; the role-grid mechanism
 (ig_set_role_grid) is kept — it is the substrate for M4 per-tensor scales.
 
-## Conclusions / next levers (feeds M3.5)
+## E7 — The real bottleneck: lost weight updates (stochastic rounding)
 
-0. **D6 adopted (hybrid grids, clamp-aware STE mandatory).** Log-byte for
-   weights/activations; fixed-point byte (step 0.1, ±12.7) for logits/CE
-   with one requantization per dot product (int32-style accumulation).
-   Every quantizer clamps AND masks backprop at the clamp (E4).
-1. **Do not chase scales globally.** S and gscale each buy ≤0.05 bpb;
-   adopt gscale≈2^16 as the working point for this arch, re-tune per arch.
-2. **Decompose the forward gap** (cheap code change): flags to quantize
-   weights-only / activations-only / logits-LUT-only, to attribute the
-   0.9 bpb. Prime suspects: (a) CE computed from quantized logsumexp,
-   (b) relu/hidden activations.
-3. **Per-tensor scales** (plan M4) — expected win is mostly range safety
-   for larger nets, not this gap.
-4. **The gap may shrink with capacity**: at ctx=4 an MLP can't use much
-   signal anyway (fp 3.41 is still far from a transformer's ~2.0); rerun
-   this matrix at M3 transformer scale before drawing C1 conclusions.
-5. If forward noise stays dominant, options: finer DELTA at equal 8 bits
-   via block-shared exponents (per-32-byte-block scale = free-ish in
-   hardware terms), or two-byte "double-log" values for the logits path
-   only (needs a constraint ruling — flagged for decision).
+**Isolation that was missing from E4's ladder, run on the real corpus:**
+
+| config (old code, RTN storage) | val bpb |
+|---|---|
+| fp oracle | 3.470 |
+| full quant | 4.875 (worse than unigram 4.74) |
+| full quant forward, **float parameter storage** (`--fp-params`) | **3.474** |
+
+Quantizing every forward value costs nothing; the entire gap was
+parameter *storage*. Mechanism: the log grid's relative step is 7.2%
+(2^0.1; ≈ a 3.8-bit mantissa, ~10× coarser than bf16), so any update
+smaller than ~3.6% of |w| rounds back to the same byte. Adam steps are
+~lr·m/√v ≈ 0.1% of |w|. Instrumented: **66% of nonzero updates lost at
+step 100, 95% at step 300, 98–100% from step 1000 on** — weights only
+moved in the brief high-lr window, then froze. Also explains: E1 (scale
+moves the window, not the relative step → no effect), E3/E4 (the overfit
+probe only memorizes at high lr, e.g. `--lr 3e-2` → 0.10 nats, where steps
+clear the grid; at default lr it stalls at 2.64), E2 (gscale "didn't
+matter" because the gradient barely reached the weights).
+
+**Fix: stochastic rounding of parameter storage** (`ig_rt2_sr`; the
+default for 1-byte storage, `--w1 --no-sr` for ablation; superseded as the
+overall default by two-byte weights, E8/D7). Unbiased (E[rt(x)] = x), still one byte per
+weight, no float master copy. Seeded xorshift; state is in checkpoint v5
+(bit-exact resume preserved). Guarded by ctest `sr_train`.
+
+Companion fixes in the same change:
+- `ig_encode_s` no longer floors nonzero values to code 1. In pure-int
+  mode that lifted ~1e-10 gradients to ~1e-6 at gscale 2^16, which Adam
+  (eps 1e-8) turned into full-size steps (pure-int+SR diverged to 7.7 bpb);
+  it also made the zero-collapse statistic structurally always 0.
+- Pure-int gradients use a **per-tensor power-of-two absmax scale** chosen
+  each step (default; `--gscale F` = old fixed global scale). Saturation
+  is 0% by construction. A fixed 2^16 clamps (max |g| ≈ 0.1) and hurts.
+- Every layer now accumulates exactly and quantizes once (`ig_requant`,
+  clamp-aware STE); previously hidden layers re-rounded each partial sum on
+  the log grid (terms < ~3.5% of the sum swamped, order-dependent), and the
+  logit fx requant did not set the clamp mask.
+- Params are initialized on the "w" grid; checkpoint byte codes use it too.
+
+**Results** (same protocol, 4000 steps; seed 42 / seed 7):
+
+| config | val bpb s42 | val bpb s7 | Δ vs fp |
+|---|---|---|---|
+| fp oracle | 3.483 | 3.438 | — |
+| quant, 1-byte SR (E7 default; superseded by D7) | **3.505** | **3.471** | +0.02 / +0.03 |
+| pure-int, SR, dyn gscale | **3.513** | **3.476** | +0.03 / +0.04 |
+| quant, `--no-sr` (RTN ablation) | 4.881 | | +1.40 |
+| quant, `--scale 64` / `1024` | 3.510 / 3.529 | | |
+| pure-int, fixed gscale 4096 / 65536 | 3.510 / 3.684 | | |
+| depth-2 (96→64): fp / quant / pure-int | 3.679 / 3.667 / 3.613 | | |
+
+The quant gap is now at seed-noise level (fp alone spans 0.045 across two
+seeds) — **already inside the M3.5 gate (≤ 0.15) at this vehicle scale.**
+(fp numbers differ by ~0.01 from E5c's binary: float rounding order
+changed with the refactor; within noise.) Depth-2 is worse for every mode
+at 4000 steps — under-trained, not a quantization effect.
+
+Update statistics (quant, seed 42): subgrid (= would be lost without SR)
+70% @100 → 97% @1000 → 99.7% @3000. SR is carrying essentially all
+learning after warmup.
+
+Pure-int gradient health (step 3500), count fraction vs **L1-mass
+fraction** (`--grad-stats`):
+
+| tensor | dyn absmax: collapse | fixed 2^16: saturation |
+|---|---|---|
+| W1 | 0% (mass 0%) | 0.04% (mass **3.4%**) |
+| b1 | 0% (mass 0%) | 14.6% (mass **10.0%**) |
+| W2 | 39.8% (mass **0.012%**) | 0.26% (mass **20.6%**) |
+| b2 | 68.8% (mass **0.004%**) | 1.17% (mass **37.4%**) |
+
+Counts mislead in both directions: dyn scaling collapses many
+softmax-tail gradients of rare bytes (~1e-7 vs max 0.46) that carry
+almost no mass (bpb unaffected: 3.513 vs 3.505), while fixed 2^16
+saturates few entries that carry a fifth to a third of the mass (and
+would have *passed* a count-based "< 1%" gate). **M5.5 gate redefined
+(user decision) to magnitude-weighted: < 2% of L1 mass lost to collapse,
+< 1% to saturation, per tensor.** Dyn absmax passes; fixed 2^16 fails.
+
+## E8 — Two-byte weights vs SR variance (long / low-lr runs)
+
+Risk from E7: 1-byte SR is unbiased but injects weight noise
+~√(Δ·Σ|update|); it should show up when the model gets good enough to
+need weights finer than the 7.2% grid. **Two-byte weights** (`--w2`):
+each parameter keeps a 16-bit master log code (sign + M in units of
+Δ/256, `ig_Value.wq`); the forward and backward passes read only the high
+byte round(M/256) — the ordinary 1-byte code, so forward numerics are
+unchanged — and the optimizer update lands in the full 16 bits, i.e. the
+low byte is a residual that accumulates sub-grid updates (Kahan-style
+master weight in bytes; resolution 0.027% relative; low→high carry is
+integer arithmetic on M). Low byte is SR-rounded by default (noise 256×
+below 1-byte SR); with `--no-sr` the path is fully deterministic.
+Checkpoint v6 stores the codes; bit-exact resume is ctest-guarded in both
+modes.
+
+Protocol: as E7 but **20 000 steps** (5× horizon), seed 42, val bpb at
+5k / 10k / 15k / 20k. Low-lr arm: lr 1e-3.
+
+| lr 5e-3 | 5k | 10k | 15k | 20k | Δ@20k vs fp |
+|---|---|---|---|---|---|
+| fp oracle | 3.427 | 3.247 | 3.146 | **3.108** | — |
+| 1-byte SR | 3.442 | 3.333 | 3.286 | 3.254 | **+0.146** |
+| 1-byte SR, pure-int | 3.513 | 3.325 | 3.238 | 3.210 | +0.102 |
+| **w2, SR** | 3.418 | 3.243 | 3.172 | **3.129** | **+0.021** |
+| **w2, RTN (deterministic)** | 3.406 | 3.231 | 3.154 | **3.120** | **+0.012** |
+| **w2, SR, pure-int** | 3.448 | 3.257 | 3.172 | **3.136** | **+0.028** |
+| 1-byte RTN (`--no-sr`) | 4.839 | 4.969 | 5.111 | 5.145 | +2.04 |
+
+| lr 1e-3 | 20k | Δ vs fp |
+|---|---|---|
+| fp oracle | 3.363 | — |
+| 1-byte SR | 3.370 | +0.007 |
+| w2, SR | 3.363 | +0.000 |
+| w2, RTN | 3.369 | +0.006 |
+| w2, SR, pure-int | 3.361 | −0.002 |
+
+**Findings**
+1. **The SR floor is real and grows with training:** 1-byte SR's gap goes
+   +0.015 → +0.086 → +0.141 → +0.146 over 5k → 20k steps, i.e. it already
+   leaves the M3.5 budget (≤ 0.15) on a 120 k-param MLP. E7's "gap
+   closed" holds only for short runs. It shows at high lr / long
+   horizons (model quality rising), not at low lr where the fp model
+   itself is weak (lr 1e-3: all within 0.007).
+2. **Two-byte weights remove it:** +0.01–0.03 at 20k for every variant,
+   pure-int included — seed-noise level (E7: 0.045 across seeds).
+3. **The low byte does not need SR:** deterministic w2 is as good as w2+SR
+   (3.120 vs 3.129) — the residual's 0.027% resolution is fine enough,
+   which also removes the RNG from the update path if desired.
+4. Update stats agree: at step 15k, 1-byte SR "moves" 0.4% of params per
+   step, w2 moves 15.4% of master codes (the low byte keeps learning).
+5. 1-byte RTN gets *worse* with longer training (4.84 → 5.15), above the
+   unigram floor: frozen weights + drifting high-lr updates.
+
+**Decision D7 (2026-11-12):** two-byte weights become the default and
+C1 is amended accordingly (PLAN §9); the low byte uses round-to-nearest
+by default (finding 3), SR remains available as `--w2-sr`.
+
+Caveat: single seed for the 20k arm (each run ~10 min); differences
+≥ 0.1 are well outside the measured seed noise, differences ≤ 0.03 are not.
+
+## Conclusions / next levers (supersedes the pre-E7 list)
+
+0. **SR on parameter storage is mandatory** (as PLAN §1 anticipated);
+   D6 hybrid grids + clamp-aware STE + single requant per layer stay.
+1. **The quant gap is closed at M2 scale for short runs only** (E7);
+   over 20k steps 1-byte SR drifts to +0.15 bpb (E8).
+2. **Two-byte weights fix that** (+0.01–0.03 at 20k, also in pure-int,
+   also without SR). **Adopted as default (D7, C1 amended 2026-11-12)**
+   with a round-to-nearest low byte (`--w2-sr` for SR, `--w1` for 1-byte
+   ablations). Parameters occupy 2 bytes; everything the network computes
+   with stays 1 byte.
+3. Pure-int: dynamic per-tensor pow2 absmax scale is the working point;
+   no global gscale tuning needed. Adam moments are still float
+   (reference mode) — log-byte moments are the next M5.5 item.
+4. ~~Re-define the collapse metric~~ done: M5.5 gate is mass-weighted.
+5. Watch `upd subgrid/moved` in the step log; any change to weight
+   storage must keep ctest `sr_train` green.
 
 ## Repro
 
@@ -150,4 +300,13 @@ F="--index data/split-v0/idx.bin --ctx 4 --hidden 96 --batch 4 --lr 5e-3 \
 ./build/ig-train $F --no-quant
 ./build/ig-train $F --scale 1024
 ./build/ig-train $F --pure-int --gscale 65536
+# E7
+./build/ig-train $F --w1            # quant, 1-byte weights + SR
+./build/ig-train $F --w1 --no-sr    # RTN ablation
+./build/ig-train $F --w1 --pure-int # dyn per-tensor gscale (default)
+# E8 (B = F with --steps 20000 --eval-every 5000)
+./build/ig-train $B                 # two-byte weights, RTN low byte (D7 default)
+./build/ig-train $B --w2-sr         # two-byte weights, SR low byte
+./build/ig-train $B --w1            # 1-byte SR (drifts +0.15)
+./build/ig-train $B --pure-int --w2-sr
 ```

@@ -22,6 +22,10 @@ typedef struct ig_Value {
      * optimizer pushes gradient into an immovable stored value (Momentum
      * accumulates against a wall — the E4 stuck-loss floor). */
     unsigned clamped : 1;
+    /* Parameters only, two-byte-weight mode (E8): 16-bit master log code;
+     * `data` is always its high-byte (forward) value. 0 with data != 0
+     * means "not yet initialized from data". */
+    int16_t wq;
 } ig_Value;
 
 /* Toggle quantization on/off (off = exact float mode, used for gradient checks). */
@@ -57,5 +61,11 @@ ig_Value   *ig_mul(ig_Value *a, ig_Value *b);
 ig_Value   *ig_tanh(ig_Value *a);
 ig_Value   *ig_relu(ig_Value *a);
 ig_Value   *ig_logsumexp(const ig_Value **xs, int n);
+
+/* Quantize a (typically exact, ig_fx_mode==2) accumulator exactly once
+ * onto the given grid, with clamp-aware STE. Identity when quant is off. */
+#define IG_GRID_ACT 0   /* log-byte activation grid */
+#define IG_GRID_FX  1   /* fixed-point byte grid (logits) */
+ig_Value   *ig_requant(ig_Value *a, int grid);
 
 #endif /* IG_VALUE_H */

@@ -11,12 +11,20 @@ distillation plan.
 
 ## Numerics
 
-Every scalar is stored as a single `uint8` in a symmetric log domain
+Every scalar the network computes with is a single `uint8` in a symmetric log domain
 (`include/ig/logquant.h`): sign bit + 7-bit log magnitude with a global
 scale. Multiplication is an addition of magnitudes; addition uses the
 `log1p(exp)` identity via LUT. Quantization is applied at every forward op
 output (quant-aware training), so the network learns to tolerate its own
-integer arithmetic.
+integer arithmetic. Dot products accumulate exactly and are requantized
+once per output (int32-GEMM semantics).
+
+**Parameters are stored as two bytes** (decision D7, C1 amended): a
+16-bit master log code whose high byte is the 1-byte weight the forward
+and backward passes use; the low byte accumulates optimizer updates that
+are smaller than one byte-grid step (7.2%) — without it ~98% of updates
+are lost (E7), and 1-byte stochastic rounding drifts +0.15 bpb over long
+runs (E8). Two-byte weights stay within ~0.01–0.03 bpb of float.
 
 ## Decisions (settled — see docs/PLAN.md §9)
 
@@ -29,6 +37,10 @@ integer arithmetic.
 - **D4** Latin-family corpus first, then multibyte scripts by adding data;
   ablatable causal byte-conv stem in the M3 architecture.
 - **D5** Code: MIT. Data: research-only (provenance manifests anyway).
+- **D6** Hybrid grids: log-byte weights/activations, fixed-point byte
+  logits, exact accumulation + one requant per output, clamp-aware STE.
+- **D7** Two-byte parameter storage (C1 amended): forward reads the high
+  byte, the low byte accumulates updates (round-to-nearest by default).
 
 ## Build
 
@@ -43,7 +55,10 @@ ctest --test-dir build
 ```sh
 ./build/ig-train --data data/sample.txt --steps 2000 --ctx 4 --hidden 64 --sample 200
 ./build/ig-train --no-quant ...      # exact-float oracle mode (diagnostics)
-./build/ig-train --pure-int --grad-stats --gscale 8192 --steps 500
+./build/ig-train --pure-int --grad-stats --steps 500   # dyn per-tensor gscale
+./build/ig-train --w2-sr ...         # stochastic rounding of the low weight byte
+./build/ig-train --w1 ...            # 1-byte weight storage + SR (ablation, E7/E8)
+./build/ig-train --w1 --no-sr ...    # 1-byte round-to-nearest (the old bug, E7)
 ./build/ig-pretty < stream.bin       # control bytes -> ⟪CALL⟫ … markup
 ./build/ig-pretty -r < markup.txt    # and back
 uv run tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin

@@ -45,7 +45,7 @@ static void train_range(ig_MLP *m, int ctx, long from, long to, uint8_t *win,
     }
 }
 
-int main(void)
+static int run_case(int w2)
 {
     const int ctx = 2, nh = 8;
     uint8_t win[8];
@@ -79,21 +79,38 @@ int main(void)
     ig_Value **lb[4] = { c->W1, c->b1, c->W2, c->b2 };
     long ns[4] = { (long)ctx * IG_VOCAB * nh, nh,
                    (long)nh * IG_VOCAB, IG_VOCAB };
-    long diffs = 0, checked = 0;
+    long diffs = 0, checked = 0, lowbyte = 0;
     for (int g = 0; g < 4; g++) {
         for (long i = 0; i < ns[g]; i++, checked++) {
-            if (la[g][i]->data != lb[g][i]->data) diffs++;
+            if (la[g][i]->data != lb[g][i]->data
+                || la[g][i]->wq != lb[g][i]->wq) diffs++;
+            if (la[g][i]->wq % 256 != 0) lowbyte++; /* residual byte in use */
         }
+    }
+    if (w2 && lowbyte == 0) {
+        fprintf(stderr, "FAIL: w2 run never used the low byte\n");
+        return 1;
     }
     if (checked == 0 || diffs > 0) {
         fprintf(stderr, "FAIL: %ld/%ld params differ after resume\n",
                 diffs, checked);
         return 1;
     }
-    printf("checkpoint: resume is bit-exact over %ld params\n", checked);
+    printf("checkpoint: resume is bit-exact over %ld params (w2=%d)\n", checked, w2);
     unlink(ck);
     unlink("/tmp/ig_test_ckpt_straight.bin");
     ig_mlp_free(a);
     ig_mlp_free(c);
+    return 0;
+}
+
+int main(void)
+{
+    ig_w2 = 0;
+    if (run_case(0)) return 1;
+    rs = 12345;
+    ig_w2 = 1;
+    if (run_case(1)) return 1;
+    ig_w2 = 0;
     return 0;
 }

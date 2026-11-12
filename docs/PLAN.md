@@ -6,7 +6,7 @@ constraints and one goal:
 
 | # | Constraint | Interpretation (see also §9 Clarifications) |
 |---|-----------|----------------------------------------------|
-| C1 | Only **integer bytes** as datatype | Every scalar (weight, activation, gradient) is one `uint8` in a **logarithmic domain**. Float exists only transiently inside the reference implementation; the target is pure-int kernels. |
+| C1 | Only **integer bytes** as datatype | Every scalar the **forward/backward pass** touches (weight as read by the forward pass, activation, gradient, logit) is one byte (`uint8` log domain, or fixed-point byte for logits, D6). **Parameters are stored as two bytes** (D7, amended 2026-11-12): a 16-bit master log code whose high byte is the 1-byte weight the network computes with; the low byte only accumulates optimizer updates. Float exists only transiently inside the reference implementation; the target is pure-int kernels. |
 | C2 | **No tokenizer** | The model consumes and emits raw UTF-8 bytes (alphabet = 256). |
 | C3 | Hardware: **CPU, 128 GB RAM, RTX 4070 Ti (12 GB VRAM)** | Everything must fit/train on this box. |
 | G1 | **Cognitive core** | A small LLM: coherent text + learned tool usage, minimal baked-in knowledge. |
@@ -27,7 +27,8 @@ Mostly, with two real tensions we design around:
      (~3.5% per value with our 7-bit magnitude, Δ=0.1), which handles the
      many-orders-of-magnitude dynamic range of activations/gradients — the
      exact failure mode of linear INT8.
-   - **Pure-int training is the MAINLINE goal (Decision D1, 2026-07-27).**
+   - **Pure-int training is the MAINLINE goal (Decision D1, 2026-07-27;
+     parameter storage amended to 2 bytes by D7, 2026-11-12).**
      No float master weights by default: gradients live in the same
      log-byte domain (`--pure-int` flag, implemented), optimizer state is
      log-quantized, weight updates happen as additions in the log domain
@@ -81,6 +82,17 @@ code 129..255 -> −(2^((code−128)·0.1) − 1)/S
 - **Nonlinearities** (tanh/softmax/RMSNorm): LUTs over the 256-code domain —
   every activation function becomes a 256-byte table. This is the secret
   weapon of byte-log arithmetic: activation cost = one table lookup.
+- **Parameter storage uses stochastic rounding** (E7, implemented, default):
+  the 7.2% grid step is ~70× an Adam step, so round-to-nearest discards
+  ~98% of updates. Pure-int gradients use a per-tensor power-of-two
+  absmax scale chosen every step (no saturation by construction).
+  1-byte SR variance DOES floor long runs (E8: +0.15 bpb at 20k steps).
+  **Two-byte weights are the default (D7)**: 16-bit master log code per
+  parameter, forward/backward read only its high byte, the low byte is a
+  residual that accumulates sub-grid updates; round-to-nearest on the
+  16-bit grid (deterministic, no RNG in the update path). E8: +0.012 bpb
+  vs fp at 20k steps (pure-int: +0.028). `--w2-sr` adds SR on the low
+  byte, `--w1` restores 1-byte storage (with SR) for ablations.
 - **Dot products**: accumulate in a wider integer accumulator (int32) over a
   32-byte block, then requantize block sums. ("Integer bytes as datatype"
   is honored at tensor granularity; a carry accumulator is unavoidable in
@@ -241,7 +253,7 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
 | M3.5 | **Numerics gate**: fp32-mode vs log8-mode bpb gap | gap ≤ 0.15 bpb after QAT fine-tune | +1 wk |
 | **M4** | **Tool protocol + agent data pipeline**: wire format, mock-tool sandbox, teacher-trajectory generator + replay filter, loss-masking data format | 10 k verified trajectories; held-out trace-set (JSON validity 100%) | 2 wk |
 | **M5** | **CUDA backend** + int8 block GEMM; parity harness; throughput ≥ 10 k Bbytes/s train | parity tests green; 24 h soak run stable | 3–4 wk |
-| **M5.5** | **Pure-int training gate (mainline, D1)**: log-domain Adam + stochastic rounding + gradient-flow instrumentation; per-tensor gradient scales calibrated | pure-int run reaches ≥ 95% of fp-oracle val bpb at M3 scale; no NaN/divergence over 48 h soak; gradient zero-collapse < 2% and saturation < 1% on all tensors | 2–3 wk |
+| **M5.5** | **Pure-int training gate (mainline, D1)**: log-domain Adam + stochastic rounding + gradient-flow instrumentation; per-tensor gradient scales calibrated | pure-int run reaches ≥ 95% of fp-oracle val bpb at M3 scale; no NaN/divergence over 48 h soak; on every tensor, quantization destroys < 2% of the gradient L1 mass by zero-collapse and < 1% by saturation (magnitude-weighted, `--grad-stats` "mass"; count fractions are diagnostics only — E7) | 2–3 wk |
 | **M6** | **Distillation runs**: fp32 teacher (≈30 M) → log8 student; byte-marginalized KD from a local 7–14 B llama.cpp teacher for SFT/tool phase | student ≥ 80% of teacher tool-call success rate; prose coherence eval (§8) ≥ 0.8 of teacher | 2–3 wk |
 | **M7** | **Cognitive-core eval + tuning**: held-out tool benchmarks, refusal-to-hallucinate probes ("what's today's weather?" → must call tool), long-context needle test; optional MoE; optional pure-int-training experiment (research flag) | benchmark suite scripted; core behaviors ≥ target table agreed in M4 | 2–3 wk |
 | **M8** | Release: `ig-run` inference REPL (byte stream in/out, tool bridge), quantized model card, repro `make demo` | demo runs on this box in <4 GB VRAM | 1 wk |
@@ -295,6 +307,20 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
   Error budgets attach to STORED tensors only, never to intermediates of
   a subtractive identity.
 
+- **D7 — Two-byte parameter storage, C1 amended (user decision,
+  2026-11-12).** Evidence E7/E8: on the 7.2%-step byte grid, round-to-
+  nearest storage loses ~98% of updates; 1-byte stochastic rounding fixes
+  short runs but drifts to +0.15 bpb vs fp over 20k steps (SR weight
+  noise); a 16-bit master code whose high byte drives the forward pass
+  stays within +0.01–0.03 (also pure-int). Ruling: C1 holds for
+  everything the forward/backward pass computes with (1-byte weights,
+  activations, gradients, logits); **parameter storage is 2 bytes**,
+  the low byte being an update accumulator only. Default low-byte
+  rounding is **round-to-nearest** (deterministic) — SR on the low byte
+  was not needed in E8 (3.120 RTN vs 3.129 SR) and stays an option
+  (`--w2-sr`). Rationale: keeps the byte-compute spirit of C1 in the
+  network while letting training scale to M3 horizons.
+
 Remaining minor questions (non-blocking, answer anytime):
 
 - **R1** Max tool-result size before truncation/summarization policy
@@ -311,7 +337,10 @@ Remaining minor questions (non-blocking, answer anytime):
 ## 10. Top risks
 
 1. **Pure-int training diverges or plateaus (D1 raises this from risk #1
-   to the project's central bet).** Levers in order: per-tensor power-of-2
+   to the project's central bet).** Status (E7/E8): the M2-scale
+   plateau was lost updates (fixed by SR) and SR variance (fixed by
+   two-byte weights); pure-int + two-byte weights (D7 default) is within 0.03 bpb of fp over
+   20k steps. Open: log-byte Adam moments, M3 scale. Levers in order: per-tensor power-of-2
    gradient scales → log-domain gradient clipping → stochastic-rounding
    dither tuning → larger effective batch → log-domain Adam (M5.5).
    Fallback of last resort (sign-off required): fp32 optimizer state,

@@ -30,6 +30,7 @@ float    ig_get_scale(void);
 void     ig_set_gscale(float scale);  /* gradient scale (default 4096; D1 knob) */
 float    ig_get_gscale(void);
 
+uint8_t  ig_encode2(float x, float delta, float scale); /* generic grid; faithful nearest (tiny -> 0) */
 uint8_t  ig_encode(float x);          /* float -> byte (value scale) */
 float    ig_decode(uint8_t code);     /* byte  -> float (value scale) */
 float    ig_roundtrip(float x);       /* decode(encode(x)); the simulated quantization error */
@@ -64,6 +65,31 @@ void  ig_set_role_grid(const char *role, float delta, float scale); /* "act"|"w"
 void  ig_get_role_grid(const char *role, float *delta, float *scale);
 float ig_rt_act(float x);   /* forward-value grid round-trip */
 float ig_rt_w(float x);     /* parameter-storage grid round-trip */
+uint8_t ig_encode_w(float x); /* parameter byte code on the "w" role grid */
+float ig_max_abs(float delta, float scale); /* largest representable |x| */
+
+/* Stochastic rounding (E7): rounds to one of the two neighbouring grid
+ * values with probability proportional to proximity, so E[rt(x)] = x.
+ * u ~ U[0,1). Mandatory for parameter storage: Adam steps are ~0.1% of
+ * |w| while the grid step is ~7%, so round-to-nearest discards nearly
+ * every update (E7: 95-100% lost). */
+float ig_rt2_sr(float x, float delta, float scale, float u);
+float ig_rt_w_sr(float x, float u);
+
+/* ---- Two-byte weights (E8, opt-in `--w2`) ---------------------------
+ * A parameter's master value is a 16-bit log code wq = sign * M, with M
+ * in units of w_delta/256 on the same symlog "w" grid (M <= 127*256).
+ * High byte = round(M/256) = the ordinary 1-byte code: it is the ONLY
+ * thing the forward/backward pass reads. Low byte = residual that absorbs
+ * optimizer updates too small to move the high byte (Kahan-style master
+ * weight, expressed in bytes; relative resolution 2^(0.1/256)-1 ≈ 0.027%).
+ * Carry low->high is plain integer arithmetic on M.
+ *   ig_w16_encode: u in [0,1) -> stochastic rounding, u < 0 -> nearest
+ *   ig_w16_full:   full 16-bit value (optimizer view)
+ *   ig_w16_fwd:    high-byte value (forward view) */
+int16_t ig_w16_encode(float x, float u);
+float   ig_w16_full(int16_t wq);
+float   ig_w16_fwd(int16_t wq);
 
 /* Log-domain integer helpers (the "fast path" of the future int kernel): */
 uint8_t  ig_logmul(uint8_t a, uint8_t b);   /* magnitude-domain add with clamp */

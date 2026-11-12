@@ -13,7 +13,17 @@
  *            [--lr F] [--batch N] [--opt adam|sgd] [--warmup N]
  *            [--eval-every N] [--eval-windows N] [--save P] [--load P]
  *            [--sample N] [--seed N] [--no-quant] [--pure-int]
- *            [--grad-stats] [--gscale F]
+ *            [--grad-stats] [--gscale F] [--no-sr]
+ *
+ *   (default)    two-byte weights (D7): 16-bit master code per parameter,
+ *                forward/backward read only its high byte, low byte
+ *                round-to-nearest (EXPERIMENTS E8)
+ *   --w2-sr      stochastic rounding of the low byte
+ *   --w1         1-byte weights (pre-D7 storage; SR unless --no-sr)
+ *   --no-sr      with --w1: round-to-nearest storage (ablation only: loses
+ *                ~98% of updates on the byte grid, see EXPERIMENTS E7)
+ *   --gscale F   pure-int: FIXED global gradient scale; default is a
+ *                per-tensor power-of-two absmax scale chosen every step
  */
 #include <math.h>
 #include <stdio.h>
@@ -129,8 +139,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--fp-params")) ig_fp_params = 1;
         else if (!strcmp(argv[i], "--no-quant")) ig_quant_enabled = 0;
         else if (!strcmp(argv[i], "--pure-int")) ig_pure_int = 1;
+        else if (!strcmp(argv[i], "--no-sr")) ig_sr = 0;
+        else if (!strcmp(argv[i], "--w2")) ig_w2 = 1; /* default; kept for E8 repro */
+        else if (!strcmp(argv[i], "--w1")) ig_w2 = 0;
+        else if (!strcmp(argv[i], "--w2-sr")) ig_w2_sr = 1;
         else if (!strcmp(argv[i], "--grad-stats")) grad_stats = 1;
-        else if (!strcmp(argv[i], "--gscale") && i + 1 < argc) ig_set_gscale((float)atof(argv[++i]));
+        else if (!strcmp(argv[i], "--gscale") && i + 1 < argc) {
+            ig_set_gscale((float)atof(argv[++i]));
+            ig_gscale_dynamic = 0;
+        }
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) ig_set_scale((float)atof(argv[++i]));
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
@@ -176,8 +193,9 @@ int main(int argc, char **argv)
         int src2 = m->nh2 ? m->nh2 : m->nh;
         long np = (long)ctx * IG_VOCAB * nh + nh + (long)src2 * IG_VOCAB + IG_VOCAB;
         if (m->nh2) np += (long)nh * m->nh2 + m->nh2;
-        printf("ig-train: ctx=%d hidden=%d,%d quant=%s pure-int=%d opt=%s params=%ld\n",
+        printf("ig-train: ctx=%d hidden=%d,%d quant=%s pure-int=%d sr=%d w2=%d w2sr=%d gscale=%s opt=%s params=%ld\n",
                ctx, nh, m->nh2, ig_quant_enabled ? "log8" : "off", ig_pure_int,
+               ig_sr, ig_w2, ig_w2_sr, ig_gscale_dynamic ? "dyn" : "fixed",
                use_adam ? "adam" : "sgd", np);
     }
 
@@ -217,16 +235,25 @@ int main(int argc, char **argv)
             static const char *names[6] = { "W1", "b1", "W2", "b2", "W2b", "b2b" };
             for (int gi = 0; gi < (m->nh2 ? 6 : 4); gi++) {
                 ig_GradStat gs = ig_mlp_grad_stats(m, gi);
-                printf("  grads[%s] mean|g|=%.3e max|g|=%.3e collapse=%.2f%% sat=%.2f%%\n",
+                printf("  grads[%s] mean|g|=%.3e max|g|=%.3e collapse=%.2f%% (mass %.4f%%)"
+                       " sat=%.2f%% (mass %.4f%%)\n",
                        names[gi], gs.mean_abs, gs.max_abs,
-                       100.0 * gs.zero_frac, 100.0 * gs.sat_frac);
+                       100.0 * gs.zero_frac, 100.0 * gs.collapse_mass,
+                       100.0 * gs.sat_frac, 100.0 * gs.sat_mass);
             }
         }
         if (use_adam) ig_mlp_adam_update(m, lr_t);
         else ig_mlp_sgd_update(m, lr_t);
-        if (step % 100 == 0 || step == (long)steps - 1)
-            printf("step %5ld/%d  lr %.4f  loss %.4f  ppl %8.1f\n",
+        if (step % 100 == 0 || step == (long)steps - 1) {
+            long un, usub, umov;
+            ig_mlp_update_stats(&un, &usub, &umov, 1);
+            printf("step %5ld/%d  lr %.4f  loss %.4f  ppl %8.1f",
                    step, steps, lr_t, loss_acc / batch, expf((float)(loss_acc / batch)));
+            if (un > 0) /* subgrid: updates below half a grid step (lost w/o SR) */
+                printf("  upd subgrid %.1f%% moved %.1f%%",
+                       100.0 * usub / un, 100.0 * umov / un);
+            putchar('\n');
+        }
         if (ds && eval_every > 0 && (step + 1) % eval_every == 0)
             printf("** step %5ld  val bpb %.4f\n", step + 1,
                    eval_bpb(m, ds, 1, eval_windows, ctx));

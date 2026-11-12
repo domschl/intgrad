@@ -12,6 +12,85 @@ int ig_fp_params = 0; /* diagnostic: params stored float (no grid round-trip
                        * activation/logit grids. */
 
 static uint32_t rng_state;
+
+/* ---- weight-update numerics (E7) ---- */
+int ig_sr = 1;             /* stochastic rounding of parameter storage */
+int ig_gscale_dynamic = 1; /* pure-int: per-tensor pow2 absmax gradient scale */
+int ig_w2 = 1;             /* two-byte weights: 16-bit master code (E8, D7 default) */
+int ig_w2_sr = 0;          /* SR on the low byte (off by default: not needed, E8) */
+static uint64_t sr_state = 0x9E3779B97F4A7C15ull;
+static long st_n, st_subgrid, st_moved;
+
+static float sr_u(void)
+{ /* xorshift64 -> U[0,1) with 24 bits */
+    sr_state ^= sr_state << 13;
+    sr_state ^= sr_state >> 7;
+    sr_state ^= sr_state << 17;
+    return (float)(sr_state >> 40) / 16777216.0f;
+}
+
+void ig_mlp_update_stats(long *n, long *subgrid, long *moved, int reset)
+{
+    if (n) *n = st_n;
+    if (subgrid) *subgrid = st_subgrid;
+    if (moved) *moved = st_moved;
+    if (reset) st_n = st_subgrid = st_moved = 0;
+}
+
+/* Store an updated parameter: grid round-trip (SR by default) + stats.
+ * "subgrid" = |step| below half the local grid spacing, i.e. an update
+ * that round-to-nearest would silently discard. */
+static void store_param(ig_Value *p, float step)
+{
+    float old = p->data;
+    if (!ig_quant_enabled || ig_fp_params) { p->data = old - step; return; }
+    int moved;
+    if (ig_w2) {
+        /* Two-byte weight: the update lands in the 16-bit master code;
+         * the forward value is its high byte. */
+        if (p->wq == 0 && old != 0.0f) p->wq = ig_w16_encode(old, -1.0f);
+        int16_t wq0 = p->wq;
+        float tot = ig_w16_full(wq0) - step;
+        p->wq = ig_w16_encode(tot, ig_w2_sr ? sr_u() : -1.0f);
+        p->data = ig_w16_fwd(p->wq);
+        moved = p->wq != wq0;
+    } else {
+        float nv = old - step;
+        p->data = ig_sr ? ig_rt_w_sr(nv, sr_u()) : ig_rt_w(nv);
+        moved = p->data != old;
+    }
+    if (step != 0.0f) {
+        float d, sc;
+        ig_get_role_grid("w", &d, &sc);
+        float half = 0.5f * 0.69314718f * d * (1.0f / sc + fabsf(old));
+        st_n++;
+        if (fabsf(step) < half) st_subgrid++;
+        if (moved) st_moved++;
+    }
+}
+
+/* Gradient scale actually used for a parameter group. Dynamic mode picks
+ * the largest power of two that keeps max|g| inside the grid (absmax
+ * scaling, one integer max-reduction per tensor per step): saturation is
+ * impossible by construction, and range is spent where the gradients are.
+ * A fixed global gscale clamps (E7: 2^16 diverges once updates are real). */
+static float group_gscale(ig_Value *const *ps, long n)
+{
+    if (!ig_gscale_dynamic) return ig_get_gscale();
+    float mx = 0.0f;
+    for (long i = 0; i < n; i++) {
+        float a = fabsf(ps[i]->grad);
+        if (a > mx) mx = a;
+    }
+    if (mx == 0.0f) return ig_get_gscale();
+    float lim = ig_max_abs(IG_DELTA, 1.0f); /* |g|*scale must stay <= lim */
+    return exp2f(floorf(log2f(lim / mx)));
+}
+
+static float grad_q(float g, float gs)
+{
+    return ig_pure_int ? ig_decode_s(ig_encode_s(g, gs), gs) : g;
+}
 static float frand01(void)
 { /* xorshift32 */
     rng_state ^= rng_state << 13;
@@ -28,6 +107,7 @@ ig_MLP *ig_mlp_new2(int ctx, int nh, int nh2, unsigned seed)
     ig_MLP *m = calloc(1, sizeof *m);
     if (!m) { fprintf(stderr, "ig: oom\n"); exit(1); }
     rng_state = seed ? seed : 0x9E3779B9u;
+    sr_state = 0x9E3779B97F4A7C15ull ^ ((uint64_t)rng_state << 17) ^ rng_state;
     int nin = ctx * IG_VOCAB;
     int src = nh2 ? nh2 : nh;
 
@@ -89,6 +169,12 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
     ig_Value **hv = malloc(sizeof(ig_Value *) * (size_t)nh);
     ig_Value **logits = malloc(sizeof(ig_Value *) * IG_VOCAB);
 
+    /* Every layer = int8 GEMM semantics (D6): products and partial sums are
+     * exact (ig_fx_mode 2 emulates the int32 accumulator), and each output
+     * is quantized exactly ONCE via ig_requant (clamp-aware STE). Earlier
+     * versions re-rounded every partial sum on the log grid, which swamps
+     * terms below ~3.5% of the running sum and is order-dependent. */
+    ig_fx_mode = 2;
     /* One-hot inputs: only the active byte per position contributes. */
     for (int j = 0; j < nh; j++) {
         ig_Value *acc = m->b1[j];
@@ -96,7 +182,7 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
             ig_Value *w = m->W1[(size_t)(p * IG_VOCAB + in[p]) * nh + j];
             acc = ig_add(acc, w); /* x_i == 1, so plain add; grad d/dW = 1 */
         }
-        hv[j] = ig_relu(acc);
+        hv[j] = ig_relu(ig_requant(acc, IG_GRID_ACT)); /* relu of a grid value stays on grid */
     }
     ig_Value **srcv = hv;
     int nsrc = nh;
@@ -107,27 +193,21 @@ ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in)
             ig_Value *acc = m->b2b[j];
             for (int i = 0; i < nh; i++)
                 acc = ig_add(acc, ig_mul(hv[i], m->W2b[(size_t)i * m->nh2 + j]));
-            hv2[j] = ig_relu(acc);
+            hv2[j] = ig_relu(ig_requant(acc, IG_GRID_ACT));
         }
         srcv = hv2;
         nsrc = m->nh2;
     }
     /* D6 hybrid grid: the output/CE path uses the fixed-point byte grid
      * (constant absolute error), since CE noise scales with the ABSOLUTE
-     * logit error; the log grid's 7% relative step there floors loss (E3). */
+     * logit error. */
     int qsav = ig_quant_enabled;
     if (ig_fp_logits) ig_quant_enabled = 0; /* isolation: float logits */
-    ig_fx_mode = ig_fp_logits ? 0 : 2; /* exact accumulation (int32 GEMM) */
     for (int k = 0; k < IG_VOCAB; k++) {
         ig_Value *acc = m->b2[k];
         for (int j = 0; j < nsrc; j++)
             acc = ig_add(acc, ig_mul(srcv[j], m->W2[(size_t)j * IG_VOCAB + k]));
-        logits[k] = acc;
-    }
-    if (!ig_fp_logits) {
-        ig_fx_mode = 1;
-        for (int k = 0; k < IG_VOCAB; k++) /* single requantization per logit */
-            logits[k]->data = ig_fx_roundtrip(logits[k]->data);
+        logits[k] = ig_requant(acc, IG_GRID_FX); /* single requantization per logit */
     }
     ig_fx_mode = 0;
     ig_quant_enabled = qsav;
@@ -183,35 +263,42 @@ void ig_mlp_zero_grad(ig_MLP *m)
 
 static void sgd_list(ig_Value **ps, long n, float lr)
 {
+    float gs = ig_pure_int ? group_gscale(ps, n) : 0.0f;
     for (long i = 0; i < n; i++) {
         ig_Value *p = ps[i];
-        float g = p->grad;
-        if (ig_pure_int) g = ig_roundtrip_g(g); /* D1: gradient on the byte grid */
-        float v = p->data - lr * g;
-        p->data = (ig_quant_enabled && !ig_fp_params) ? ig_rt_w(v) : v;
+        float g = grad_q(p->grad, gs); /* D1: gradient on the byte grid */
+        store_param(p, lr * g);
     }
 }
 
 static ig_GradStat stats_list(ig_Value **ps, long n)
 {
+    float gs = group_gscale(ps, n);
+    float gmax = ig_max_abs(IG_DELTA, gs);
     ig_GradStat s = { 0 };
     s.n = n;
     long ztrue = 0, zq = 0, sat = 0;
+    double zmass = 0.0, smass = 0.0;
     for (long i = 0; i < n; i++) {
         float g = ps[i]->grad;
         float a = fabsf(g);
         s.mean_abs += a;
         if (a > s.max_abs) s.max_abs = a;
-        uint8_t c = ig_encode_s(g, ig_get_gscale());
+        uint8_t c = ig_encode_s(g, gs);
         if (g == 0.0f) ztrue++;             /* structural zero (e.g. one-hot) */
-        else if (c == 0) zq++;              /* nonzero gradient collapsed by quantization */
-        else if ((c & 0x7Fu) == IG_MAX_CODE) sat++;
+        else if (c == 0) { zq++; zmass += a; } /* collapsed by quantization */
+        else if (a > gmax) { sat++; smass += a - gmax; }
     }
     if (n > 0) {
+        double tot = s.mean_abs;
         s.mean_abs /= (double)n;
         s.zero_frac = (float)zq / (float)n; /* collapse only; true zeros excluded */
         s.true_zero_frac = (float)ztrue / (float)n;
         s.sat_frac = (float)sat / (float)n;
+        if (tot > 0.0) {
+            s.collapse_mass = (float)(zmass / tot);
+            s.sat_mass = (float)(smass / tot);
+        }
     }
     return s;
 }
@@ -310,16 +397,15 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
                    (long)m->nh * m->nh2, m->nh2 };
     int ng = m->nh2 ? 6 : 4;
     for (int gi = 0; gi < ng; gi++) {
+        float gs = ig_pure_int ? group_gscale(lists[gi], ns[gi]) : 0.0f;
         for (long i = 0; i < ns[gi]; i++) {
             ig_Value *p = lists[gi][i];
-            float g = p->grad;
-            if (ig_pure_int) g = ig_roundtrip_g(g); /* D1 */
+            float g = grad_q(p->grad, gs); /* D1 */
             AdamCell *c = &adam_state[k++];
             c->m = b1 * c->m + (1.0f - b1) * g;
             c->v = b2 * c->v + (1.0f - b2) * g * g;
             float step = lr * (c->m / bc1) / (sqrtf(c->v / bc2) + eps);
-            float nv = p->data - step;
-            p->data = (ig_quant_enabled && !ig_fp_params) ? ig_rt_w(nv) : nv;
+            store_param(p, step);
         }
     }
 }
@@ -334,7 +420,8 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     FILE *f = fopen(tmp, "wb");
     if (!f) { fprintf(stderr, "ig: cannot write %s\n", tmp); return -1; }
     char magic[4] = { 'I', 'G', 'C', 'K' };
-    int vers = 4; /* v2: Adam, v3: +steps/RNG, v4: +nh2 (E6 depth probe) */
+    int vers = 6; /* v2: Adam, v3: +steps/RNG, v4: +nh2 (E6), v5: +SR rng,
+                   * v6: +16-bit master codes (two-byte weights, E8) */
     fwrite(magic, 1, 4, f);
     fwrite(&vers, sizeof vers, 1, f);
     fwrite(&m->ctx, sizeof m->ctx, 1, f);
@@ -352,7 +439,7 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     for (int gi = 0; gi < ng; gi++) {
         for (long i = 0; i < ns[gi]; i++) {
             float d = lists[gi][i]->data;
-            uint8_t code = ig_encode(d); /* the byte-only view of the model */
+            uint8_t code = ig_encode_w(d); /* the byte-only view of the model */
             fwrite(&d, sizeof d, 1, f);
             fwrite(&code, 1, 1, f);
         }
@@ -368,6 +455,10 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     int64_t sd = steps_done;
     fwrite(&sd, sizeof sd, 1, f);
     fwrite(&rng, sizeof rng, 1, f);
+    fwrite(&sr_state, sizeof sr_state, 1, f); /* v5 */
+    for (int gi = 0; gi < ng; gi++) /* v6 */
+        for (long i = 0; i < ns[gi]; i++)
+            fwrite(&lists[gi][i]->wq, sizeof(int16_t), 1, f);
     if (ferror(f) || fclose(f) != 0) {
         fprintf(stderr, "ig: save failed\n");
         remove(tmp);
@@ -386,7 +477,7 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
     float s1, s2;
     if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "IGCK", 4) != 0
         || fread(&vers, sizeof vers, 1, f) != 1
-        || (vers != 1 && vers != 2 && vers != 3 && vers != 4)
+        || vers < 1 || vers > 6
         || fread(&ctx, sizeof ctx, 1, f) != 1
         || fread(&nh, sizeof nh, 1, f) != 1
         || (vers >= 4 && fread(&nh2, sizeof nh2, 1, f) != 1)
@@ -445,6 +536,22 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
             ig_mlp_free(m);
             fclose(f);
             return NULL;
+        }
+        if (vers >= 5 && fread(&sr_state, sizeof sr_state, 1, f) != 1) {
+            fprintf(stderr, "ig: ckpt missing SR state\n");
+            ig_mlp_free(m);
+            fclose(f);
+            return NULL;
+        }
+        for (int gi = 0; vers >= 6 && gi < ng; gi++) {
+            for (long i = 0; i < ns[gi]; i++) {
+                if (fread(&lists[gi][i]->wq, sizeof(int16_t), 1, f) != 1) {
+                    fprintf(stderr, "ig: ckpt missing master codes\n");
+                    ig_mlp_free(m);
+                    fclose(f);
+                    return NULL;
+                }
+            }
         }
         if (steps_out) *steps_out = (long)sd;
         if (rng_out) *rng_out = rg;

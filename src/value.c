@@ -57,14 +57,18 @@ static float qz(float x)
 
 /* True iff quantizing x would clamp at the grid edge (vs. round normally).
  * In-range rounding has STE derivative 1; clamping has derivative 0. */
+static int grid_clamped(float x, int fx)
+{
+    if (fx) return fabsf(x) > 127.0f * ig_get_fxstep();
+    float d, s;
+    ig_get_role_grid("act", &d, &s);
+    return fabsf(x) > ig_max_abs(d, s);
+}
+
 static int qz_clamped(float x)
 {
     if (!ig_quant_enabled || ig_fx_mode == 2) return 0;
-    if (ig_fx_mode == 1)
-        return fabsf(x) > 127.0f * ig_get_fxstep();
-    float d, s;
-    ig_get_role_grid("act", &d, &s);
-    return fabsf(x) > (exp2f((float)IG_MAX_CODE * d) - 1.0f) / s;
+    return grid_clamped(x, ig_fx_mode == 1);
 }
 
 static ig_Value *mk(void)
@@ -85,7 +89,7 @@ ig_Value *ig_value_persist(float x)
 {
     ig_Value *v = calloc(1, sizeof *v);
     if (!v) { fprintf(stderr, "ig: out of memory\n"); exit(1); }
-    v->data = qz(x);
+    v->data = ig_quant_enabled ? ig_rt_w(x) : x; /* params live on the w grid */
     return v;
 }
 
@@ -191,6 +195,32 @@ static void bp_logsumexp(ig_Value *s)
     for (int i = 0; i < s->nchildren; i++)
         s->children[i]->grad +=
             s->grad * expf(s->children[i]->data - s->data);
+}
+
+/* Requantize once (end of an exact int32-style accumulation). STE: the
+ * gradient passes 1:1 in range, 0 where the grid clamped. */
+static void bp_requant(ig_Value *s)
+{
+    if (s->clamped) return;
+    s->children[0]->grad += s->grad;
+}
+
+ig_Value *ig_requant(ig_Value *a, int grid)
+{
+    ig_Value *cs[1] = { a };
+    int sav = ig_fx_mode;
+    ig_fx_mode = 0;
+    ig_Value *v = op(cs, 1, a->data, bp_requant); /* exact copy ... */
+    ig_fx_mode = sav;
+    if (ig_quant_enabled) { /* ... then exactly one quantization */
+        int fx = grid == IG_GRID_FX;
+        v->data = fx ? ig_fx_roundtrip(a->data) : ig_rt_act(a->data);
+        v->clamped = grid_clamped(a->data, fx);
+    } else {
+        v->data = a->data;
+        v->clamped = 0;
+    }
+    return v;
 }
 
 ig_Value *ig_add(ig_Value *a, ig_Value *b)
