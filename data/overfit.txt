@@ -1,0 +1,8 @@
+the cat sat. the dog ran. the bird flew.
+the cat ran. the dog sat. the bird dived.
+call:get_weather{"city":"rome"}
+result:{"temp":24,"cond":"clear"}
+call:calc{"expr":"2+3"}
+result:{"value":5}
+hi how are you? i am well, thanks.
+what is the time? it is noon.

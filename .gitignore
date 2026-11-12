@@ -9,9 +9,13 @@ compile_commands.json
 # Training data: NEVER commit. Much of it is not openly licensed
 # (research-only per Decision D5); the repo stores pipeline code only.
 # ---------------------------------------------------------------------------
+# (gitignore has no trailing comments: a "# ..." after a pattern becomes
+# part of the pattern, which silently broke these exceptions before.)
 data/*
-!data/sample.txt    # small synthetic corpus, authored for this repo (MIT)
-!data/overfit.txt   # tiny memorization probe corpus (MIT)
+# small synthetic corpus, authored for this repo (MIT)
+!data/sample.txt
+# tiny memorization probe corpus, authored for this repo (MIT)
+!data/overfit.txt
 .DS_Store
 ._*
 __pycache__/
