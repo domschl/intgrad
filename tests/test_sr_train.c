@@ -30,6 +30,8 @@ static uint64_t nx(void)
     return rs;
 }
 
+static int use_lion;
+
 static double run(const uint8_t *d, size_t n, int quant, int sr, int w2)
 {
     ig_quant_enabled = quant;
@@ -51,7 +53,8 @@ static double run(const uint8_t *d, size_t n, int quant, int sr, int w2)
             free(lg);
         }
         ig_mlp_scale_grads(m, 1.0f / BATCH);
-        ig_mlp_adam_update(m, lr);
+        if (use_lion) ig_mlp_lion_update(m, lr * 0.3f); /* Lion: ~3x lower lr */
+        else ig_mlp_adam_update(m, lr);
         ig_reset();
     }
     double tot = 0.0;
@@ -80,7 +83,6 @@ int main(void)
     double w2rtn = run(d, n, 1, 0, 1);
     printf("sr_train: CE nats  fp %.3f  quant+SR %.3f  quant+RTN %.3f"
            "  w2+SR %.3f  w2+RTN %.3f\n", fp, sr, rtn, w2sr, w2rtn);
-    free(d);
 
     if (sr > fp + 0.35) {
         fprintf(stderr, "FAIL: quantized (SR) %.3f not within 0.35 of fp %.3f\n", sr, fp);
@@ -98,6 +100,17 @@ int main(void)
                         " 0.35 of fp %.3f\n", w2sr, w2rtn, fp);
         return 1;
     }
+    /* Lion (E9): quantized (two-byte weights, 16-bit momentum) must track
+     * its float oracle. */
+    use_lion = 1;
+    double lfp = run(d, n, 0, 1, 0);
+    double lq = run(d, n, 1, 0, 1);
+    printf("sr_train: Lion CE nats  fp %.3f  quant (w2, m b2) %.3f\n", lfp, lq);
+    if (lq > lfp + 0.35) {
+        fprintf(stderr, "FAIL: Lion quantized %.3f not within 0.35 of fp %.3f\n", lq, lfp);
+        return 1;
+    }
+    free(d);
     puts("sr_train: passed");
     return 0;
 }

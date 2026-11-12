@@ -6,11 +6,15 @@
  *                          sampling touches train-bucket docs only, val
  *                          bpb is measured on hash-pinned held-out docs.
  *
- * Features: gradient-accumulation batches, Adam (default) or SGD,
+ * Features: gradient-accumulation batches, Lion (default), Adam or SGD,
  * linear warmup + cosine decay, periodic val-bpb eval, checkpoints.
  *
  *   ig-train [--index P | --data F] [--steps N] [--ctx N] [--hidden N]
- *            [--lr F] [--batch N] [--opt adam|sgd] [--warmup N]
+ *            [--lr F] [--batch N] [--opt lion|adam|sgd] [--warmup N]
+ *            [--wd F] [--lion-m f32|b2|b1|b1sr]
+ *
+ *   --opt        default lion (D8): lr 2e-3, wd 0.1, batch 32 unless given;
+ *                adam/sgd: lr 3e-3, wd 0, batch 1 unless given
  *            [--eval-every N] [--eval-windows N] [--save P] [--load P]
  *            [--sample N] [--seed N] [--no-quant] [--pure-int]
  *            [--grad-stats] [--gscale F] [--no-sr]
@@ -92,11 +96,12 @@ int main(int argc, char **argv)
     const char *path = NULL, *index = NULL;
     const char *save = NULL, *load = NULL;
     int steps = 2000, ctx = 4, nh = 64, nsample = 0, seed = 42;
-    int batch = 1, warmup = 100, eval_every = 0, eval_windows = 512;
-    int grad_stats = 0, use_adam = 1, sched_cosine = 1, save_every = 0;
+    int batch = -1, warmup = 100, eval_every = 0, eval_windows = 512;
+    int grad_stats = 0, opt = 2 /* 0 sgd, 1 adam, 2 lion (default, D8) */, sched_cosine = 1, save_every = 0;
     int hidden2 = 0;                       /* E6 depth-vs-precision probe */
     float w_delta = 0, a_delta = 0, w_scale = 0, a_scale = 0;
-    float lr = 3e-3f;
+    float lr = -1.0f;   /* -1: optimizer default (D8): lion 2e-3, adam/sgd 3e-3 */
+    int wd_set = 0;
 
     for (int i = 1; i < argc; i++) {
         long v;
@@ -124,8 +129,9 @@ int main(int argc, char **argv)
 #undef OPT
         else if (!strcmp(argv[i], "--opt") && i + 1 < argc) {
             const char *o = argv[++i];
-            if (!strcmp(o, "adam")) use_adam = 1;
-            else if (!strcmp(o, "sgd")) use_adam = 0;
+            if (!strcmp(o, "adam")) opt = 1;
+            else if (!strcmp(o, "sgd")) opt = 0;
+            else if (!strcmp(o, "lion")) opt = 2;
             else { fprintf(stderr, "bad --opt %s\n", o); return 2; }
         }
         else if (!strcmp(argv[i], "--sched") && i + 1 < argc) {
@@ -140,6 +146,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--no-quant")) ig_quant_enabled = 0;
         else if (!strcmp(argv[i], "--pure-int")) ig_pure_int = 1;
         else if (!strcmp(argv[i], "--no-sr")) ig_sr = 0;
+        else if (!strcmp(argv[i], "--wd") && i + 1 < argc) { ig_wd = (float)atof(argv[++i]); wd_set = 1; }
+        else if (!strcmp(argv[i], "--lion-m") && i + 1 < argc) {
+            const char *q = argv[++i];
+            if (!strcmp(q, "f32")) ig_lion_m = IG_OPTQ_F32;
+            else if (!strcmp(q, "b2")) ig_lion_m = IG_OPTQ_B2;
+            else if (!strcmp(q, "b1")) ig_lion_m = IG_OPTQ_B1;
+            else if (!strcmp(q, "b1sr")) ig_lion_m = IG_OPTQ_B1SR;
+            else { fprintf(stderr, "bad --lion-m %s\n", q); return 2; }
+        }
         else if (!strcmp(argv[i], "--w2")) ig_w2 = 1; /* default; kept for E8 repro */
         else if (!strcmp(argv[i], "--w1")) ig_w2 = 0;
         else if (!strcmp(argv[i], "--w2-sr")) ig_w2_sr = 1;
@@ -151,6 +166,16 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--scale") && i + 1 < argc) ig_set_scale((float)atof(argv[++i]));
         else { fprintf(stderr, "unknown arg: %s\n", argv[i]); return 2; }
     }
+    /* Optimizer-dependent defaults (D8 / EXPERIMENTS E9), only where the
+     * flag was not given: Lion needs a lower lr, decoupled wd and a batch
+     * of at least ~32 (batch 4: 3.63 vs Adam 3.11 bpb). Adam/SGD keep the
+     * pre-D8 defaults. */
+    if (lr < 0.0f) lr = opt == 2 ? 2e-3f : 3e-3f;
+    if (batch < 0) batch = opt == 2 ? 32 : 1;
+    if (!wd_set && opt == 2) ig_wd = 0.1f;
+    if (opt == 2 && batch < 32)
+        fprintf(stderr, "ig-train: warning: Lion with batch %d < 32 "
+                        "(sign updates are noisy at small batch, E9)\n", batch);
     if (w_delta || w_scale) {
         float d, s;
         ig_get_role_grid("w", &d, &s);
@@ -184,6 +209,13 @@ int main(int argc, char **argv)
         if (!m) return 1;
         ctx = m->ctx; nh = m->nh;
         if (ck_rng) rng_state = ck_rng; /* continue data order bit-exactly */
+        int st = ig_mlp_opt_state();
+        if ((opt == 2 && (st & 1) && !(st & 2)) || (opt == 1 && (st & 2) && !(st & 1)))
+            fprintf(stderr, "ig-train: warning: checkpoint carries %s state but "
+                            "--opt is %s; optimizer restarts from zero state "
+                            "(pass --opt %s to continue it)\n",
+                    st & 1 ? "Adam" : "Lion", opt == 2 ? "lion" : "adam",
+                    st & 1 ? "adam" : "lion");
         printf("ig-train: resumed %s (ctx=%d nh=%d) at step %ld\n",
                load, ctx, nh, start_step);
     } else {
@@ -196,7 +228,16 @@ int main(int argc, char **argv)
         printf("ig-train: ctx=%d hidden=%d,%d quant=%s pure-int=%d sr=%d w2=%d w2sr=%d gscale=%s opt=%s params=%ld\n",
                ctx, nh, m->nh2, ig_quant_enabled ? "log8" : "off", ig_pure_int,
                ig_sr, ig_w2, ig_w2_sr, ig_gscale_dynamic ? "dyn" : "fixed",
-               use_adam ? "adam" : "sgd", np);
+               opt == 2 ? "lion" : opt == 1 ? "adam" : "sgd", np);
+        if (opt == 2) {
+            static const char *qn[4] = { "f32", "b2", "b1", "b1sr" };
+            printf("ig-train: lion m-state=%s", qn[ig_lion_m_mode()]);
+        } else {
+            printf("ig-train: %s", opt == 1 ? "adam" : "sgd");
+        }
+        printf(" lr=%g batch=%d wd=%g\n", lr, batch, ig_wd);
+        if (0) {
+        }
     }
 
     clock_t t0 = clock();
@@ -242,7 +283,8 @@ int main(int argc, char **argv)
                        100.0 * gs.sat_frac, 100.0 * gs.sat_mass);
             }
         }
-        if (use_adam) ig_mlp_adam_update(m, lr_t);
+        if (opt == 2) ig_mlp_lion_update(m, lr_t);
+        else if (opt == 1) ig_mlp_adam_update(m, lr_t);
         else ig_mlp_sgd_update(m, lr_t);
         if (step % 100 == 0 || step == (long)steps - 1) {
             long un, usub, umov;

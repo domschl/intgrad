@@ -26,6 +26,10 @@ are smaller than one byte-grid step (7.2%) — without it ~98% of updates
 are lost (E7), and 1-byte stochastic rounding drifts +0.15 bpb over long
 runs (E8). Two-byte weights stay within ~0.01–0.03 bpb of float.
 
+The default optimizer is **Lion** (decision D8): a single momentum
+stored as 16-bit log codes and a sign update — no square root, division
+or epsilon, so its integer form is a sign test plus one code comparison.
+
 ## Decisions (settled — see docs/PLAN.md §9)
 
 - **D1** Pure-int training is mainline (no float master weights; fp32
@@ -41,6 +45,9 @@ runs (E8). Two-byte weights stay within ~0.01–0.03 bpb of float.
   logits, exact accumulation + one requant per output, clamp-aware STE.
 - **D7** Two-byte parameter storage (C1 amended): forward reads the high
   byte, the low byte accumulates updates (round-to-nearest by default).
+- **D8** Lion is the default optimizer (one int-native 16-bit momentum,
+  sign update; lr 2e-3, wd 0.1, batch 32); Adam via `--opt adam`.
+  Accepted cost: ~0.1 bpb vs Adam at matched data on the M2 vehicle (E9).
 
 ## Build
 
@@ -53,9 +60,10 @@ ctest --test-dir build
 ## Try it
 
 ```sh
-./build/ig-train --data data/sample.txt --steps 2000 --ctx 4 --hidden 64 --sample 200
+./build/ig-train --data data/sample.txt --steps 500 --ctx 4 --hidden 64 --sample 200
 ./build/ig-train --no-quant ...      # exact-float oracle mode (diagnostics)
 ./build/ig-train --pure-int --grad-stats --steps 500   # dyn per-tensor gscale
+./build/ig-train --opt adam ...      # Adam instead of Lion (defaults lr 3e-3, batch 1, wd 0)
 ./build/ig-train --w2-sr ...         # stochastic rounding of the low weight byte
 ./build/ig-train --w1 ...            # 1-byte weight storage + SR (ablation, E7/E8)
 ./build/ig-train --w1 --no-sr ...    # 1-byte round-to-nearest (the old bug, E7)
@@ -67,12 +75,14 @@ uv run tools/gen_traces.py --n 8 --out data/traces.jsonl --wire data/traces.bin
 ## Training & resume semantics
 
 `--steps` is the **total horizon** (absolute), `--save` writes checkpoints
-containing: params (fp32 + byte code), **Adam moments**, **steps done**,
+containing: params (fp32 + byte code + 16-bit master codes), **optimizer
+state** (Lion momentum or Adam moments), **steps done**,
 and **RNG position** — so `--load` continues the LR schedule and data order
 bit-exactly (guarded by `ctest` checkpoint test; atomic tmp+rename writes,
 `--save-every N` for crash-safe periodic saves). Hyperparameters (lr, batch,
 arch, warmup, sched) are *not* in the checkpoint: pass the same flags on
-resume. Note a cosine run of N steps is not a prefix of a longer horizon —
+resume — including `--opt` (the trainer warns if a checkpoint's optimizer
+state doesn't match). Note a cosine run of N steps is not a prefix of a longer horizon —
 always give every segment the same total `--steps`.
 
 ## Data (never committed — see docs/DATA.md)

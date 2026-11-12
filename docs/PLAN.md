@@ -93,6 +93,11 @@ code 129..255 -> −(2^((code−128)·0.1) − 1)/S
   16-bit grid (deterministic, no RNG in the update path). E8: +0.012 bpb
   vs fp at 20k steps (pure-int: +0.028). `--w2-sr` adds SR on the low
   byte, `--w1` restores 1-byte storage (with SR) for ablations.
+- **Optimizer: Lion (default, D8)** — one momentum on a 16-bit log grid
+  (per-tensor pow2 absmax scale), update lr·sign(·): int-native, no
+  sqrt/division/eps. Defaults: lr 2e-3, β 0.9/0.99, wd 0.1, batch 32.
+  Adam stays available (`--opt adam`; float moments, reference mode).
+  Known cost (E9): ~0.1 bpb vs Adam at matched data on the M2 vehicle.
 - **Dot products**: accumulate in a wider integer accumulator (int32) over a
   32-byte block, then requantize block sums. ("Integer bytes as datatype"
   is honored at tensor granularity; a carry accumulator is unavoidable in
@@ -321,6 +326,20 @@ fast, so use KD mostly for midtrain/SFT, plain CE for raw pretraining.
   (`--w2-sr`). Rationale: keeps the byte-compute spirit of C1 in the
   network while letting training scale to M3 horizons.
 
+- **D8 — Lion is the default optimizer; Adam is an option (user
+  decision, 2026-11-12).** Rationale: Adam loses its elegance under int
+  scaling (two moments, v spanning ~2× the octave range of g, sqrt,
+  division, eps/zero-point handling); Lion keeps one state and a sign
+  update whose int form is a sign test plus one log-code comparison. We
+  can afford larger batches and re-tuned hyperparameters. **Accepted,
+  documented cost (E9):** on the M2 MLP vehicle Lion trails Adam by
+  ~0.10 bpb fp / ~0.12 quantized at matched data, at batch 32 and 128
+  (≈ 1.5–2× data). Lion is quantization-robust (+0.015–0.04 quant gap with
+  a 16-bit momentum; pure-int ≈ quant). Defaults: lr 2e-3, wd 0.1,
+  batch 32, β 0.9/0.99, momentum `b2`; batch < 32 warns. Re-measure the
+  Lion/Adam gap at M3 (transformer, realistic batch) and revisit if it
+  stays ≳ 0.1 bpb.
+
 Remaining minor questions (non-blocking, answer anytime):
 
 - **R1** Max tool-result size before truncation/summarization policy
@@ -340,7 +359,9 @@ Remaining minor questions (non-blocking, answer anytime):
    to the project's central bet).** Status (E7/E8): the M2-scale
    plateau was lost updates (fixed by SR) and SR variance (fixed by
    two-byte weights); pure-int + two-byte weights (D7 default) is within 0.03 bpb of fp over
-   20k steps. Open: log-byte Adam moments, M3 scale. Levers in order: per-tensor power-of-2
+   20k steps. Optimizer state: Lion (D8) keeps one 16-bit momentum, so the
+   former "log-byte Adam moments" item is moot for the default path.
+   Open: M3 scale. Levers in order: per-tensor power-of-2
    gradient scales → log-domain gradient clipping → stochastic-rounding
    dither tuning → larger effective batch → log-domain Adam (M5.5).
    Fallback of last resort (sign-off required): fp32 optimizer state,

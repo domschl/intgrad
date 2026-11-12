@@ -88,6 +88,9 @@ float ig_rt_w_sr(float x, float u);
  *   ig_w16_full:   full 16-bit value (optimizer view)
  *   ig_w16_fwd:    high-byte value (forward view) */
 int16_t ig_w16_encode(float x, float u);
+/* Same 16-bit symlog grid with explicit delta/scale (optimizer state). */
+int16_t ig_enc16(float x, float u, float delta, float scale);
+float   ig_dec16(int16_t c, float delta, float scale);
 float   ig_w16_full(int16_t wq);
 float   ig_w16_fwd(int16_t wq);
 

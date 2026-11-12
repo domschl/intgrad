@@ -18,6 +18,8 @@ int ig_sr = 1;             /* stochastic rounding of parameter storage */
 int ig_gscale_dynamic = 1; /* pure-int: per-tensor pow2 absmax gradient scale */
 int ig_w2 = 1;             /* two-byte weights: 16-bit master code (E8, D7 default) */
 int ig_w2_sr = 0;          /* SR on the low byte (off by default: not needed, E8) */
+float ig_wd = 0.0f;        /* decoupled weight decay (AdamW / Lion) */
+int ig_lion_m = -1;        /* Lion momentum grid, IG_OPTQ_*; -1 = auto */
 static uint64_t sr_state = 0x9E3779B97F4A7C15ull;
 static long st_n, st_subgrid, st_moved;
 
@@ -374,12 +376,18 @@ static long mlp_nparams(const ig_MLP *m)
     return n;
 }
 
+static float *lion_m;
+static long lion_n;
+
 void ig_mlp_adam_reset(void)
 {
     free(adam_state);
     adam_state = NULL;
     adam_n = 0;
     adam_t = 0;
+    free(lion_m); /* resets ALL optimizer state (Adam + Lion) */
+    lion_m = NULL;
+    lion_n = 0;
 }
 
 void ig_mlp_adam_update(ig_MLP *m, float lr)
@@ -404,9 +412,100 @@ void ig_mlp_adam_update(ig_MLP *m, float lr)
             AdamCell *c = &adam_state[k++];
             c->m = b1 * c->m + (1.0f - b1) * g;
             c->v = b2 * c->v + (1.0f - b2) * g * g;
-            float step = lr * (c->m / bc1) / (sqrtf(c->v / bc2) + eps);
+            float step = lr * ((c->m / bc1) / (sqrtf(c->v / bc2) + eps)
+                               + ig_wd * p->data);
             store_param(p, step);
         }
+    }
+}
+
+/* ---------------- Lion (E9) ----------------
+ * Chen et al. 2023, "Symbolic Discovery of Optimization Algorithms":
+ *   c = b1*m + (1-b1)*g;  w -= lr*(sign(c) + wd*w);  m = b2*m + (1-b2)*g
+ * One state tensor, a constant-magnitude update, no sqrt, no division.
+ * Int view: sign(c) needs no arithmetic at all — equal signs of m and g
+ * give that sign, otherwise compare log codes |m| vs |g| with the
+ * constant offset log(b1/(1-b1)). The EMA of m is a log-domain add (LUT).
+ *
+ * m lives on a log grid with a per-tensor power-of-two absmax scale
+ * re-chosen every step (as the gradients). lion_m holds the grid VALUES
+ * (exactly representable, like p->data): b2 = 16-bit symlog codes RTN
+ * (default when quantized), b1 / b1sr = 1-byte RTN / SR (ablations),
+ * f32 = float (oracle). b2 (EMA weight) = 0.99 moves m by ~1% per step,
+ * below the 1-byte half-step (3.6%): 1-byte RTN freezes m (E7 mechanism). */
+static float *lion_tmp;
+static long lion_tmp_n;
+
+static void lion_ensure(long total, long maxgroup)
+{
+    if (lion_n != total) {
+        free(lion_m);
+        lion_m = calloc((size_t)total, sizeof(float));
+        if (!lion_m) { fprintf(stderr, "ig: oom lion\n"); exit(1); }
+        lion_n = total;
+    }
+    if (lion_tmp_n < maxgroup) {
+        free(lion_tmp);
+        lion_tmp = malloc(sizeof(float) * (size_t)maxgroup);
+        if (!lion_tmp) { fprintf(stderr, "ig: oom lion\n"); exit(1); }
+        lion_tmp_n = maxgroup;
+    }
+}
+
+int ig_lion_m_mode(void)
+{
+    if (ig_lion_m >= 0) return ig_lion_m;
+    return ig_quant_enabled ? IG_OPTQ_B2 : IG_OPTQ_F32;
+}
+
+static float optq(float x, int mode, float s)
+{
+    switch (mode) {
+    case IG_OPTQ_B2:   return ig_dec16(ig_enc16(x, -1.0f, IG_DELTA, s), IG_DELTA, s);
+    case IG_OPTQ_B1:   return ig_rt2(x, IG_DELTA, s);
+    case IG_OPTQ_B1SR: return ig_rt2_sr(x, IG_DELTA, s, sr_u());
+    default:           return x;
+    }
+}
+
+int ig_mlp_opt_state(void)
+{
+    return (adam_t > 0 ? 1 : 0) | (lion_m ? 2 : 0);
+}
+
+void ig_mlp_lion_update(ig_MLP *m, float lr)
+{
+    const float b1 = 0.9f, b2 = 0.99f;
+    int src = m->nh2 ? m->nh2 : m->nh;
+    ig_Value **lists[6] = { m->W1, m->b1, m->W2, m->b2, m->W2b, m->b2b };
+    long ns[6] = { (long)m->ctx * IG_VOCAB * m->nh, m->nh,
+                   (long)src * IG_VOCAB, IG_VOCAB,
+                   (long)m->nh * m->nh2, m->nh2 };
+    int ng = m->nh2 ? 6 : 4;
+    long maxg = 0;
+    for (int gi = 0; gi < ng; gi++) if (ns[gi] > maxg) maxg = ns[gi];
+    lion_ensure(mlp_nparams(m), maxg);
+    int mode = ig_lion_m_mode();
+    float lim = ig_max_abs(IG_DELTA, 1.0f);
+    long k = 0;
+    for (int gi = 0; gi < ng; gi++) {
+        float gs = ig_pure_int ? group_gscale(lists[gi], ns[gi]) : 0.0f;
+        float mx = 0.0f;
+        for (long i = 0; i < ns[gi]; i++) {
+            ig_Value *p = lists[gi][i];
+            float g = grad_q(p->grad, gs);
+            float mo = lion_m[k + i];
+            float c = b1 * mo + (1.0f - b1) * g;
+            float u = c > 0.0f ? 1.0f : (c < 0.0f ? -1.0f : 0.0f);
+            store_param(p, lr * (u + ig_wd * p->data));
+            float mn = b2 * mo + (1.0f - b2) * g;
+            lion_tmp[i] = mn;
+            if (fabsf(mn) > mx) mx = fabsf(mn);
+        }
+        float s = mx > 0.0f ? exp2f(floorf(log2f(lim / mx))) : 1.0f;
+        for (long i = 0; i < ns[gi]; i++)
+            lion_m[k + i] = optq(lion_tmp[i], mode, s);
+        k += ns[gi];
     }
 }
 
@@ -420,8 +519,9 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     FILE *f = fopen(tmp, "wb");
     if (!f) { fprintf(stderr, "ig: cannot write %s\n", tmp); return -1; }
     char magic[4] = { 'I', 'G', 'C', 'K' };
-    int vers = 6; /* v2: Adam, v3: +steps/RNG, v4: +nh2 (E6), v5: +SR rng,
-                   * v6: +16-bit master codes (two-byte weights, E8) */
+    int vers = 7; /* v2: Adam, v3: +steps/RNG, v4: +nh2 (E6), v5: +SR rng,
+                   * v6: +16-bit master codes (two-byte weights, E8),
+                   * v7: +Lion momentum (E9) */
     fwrite(magic, 1, 4, f);
     fwrite(&vers, sizeof vers, 1, f);
     fwrite(&m->ctx, sizeof m->ctx, 1, f);
@@ -459,6 +559,9 @@ int ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
     for (int gi = 0; gi < ng; gi++) /* v6 */
         for (long i = 0; i < ns[gi]; i++)
             fwrite(&lists[gi][i]->wq, sizeof(int16_t), 1, f);
+    int64_t ln = lion_m ? lion_n : 0; /* v7 */
+    fwrite(&ln, sizeof ln, 1, f);
+    if (ln) fwrite(lion_m, sizeof(float), (size_t)ln, f);
     if (ferror(f) || fclose(f) != 0) {
         fprintf(stderr, "ig: save failed\n");
         remove(tmp);
@@ -477,7 +580,7 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
     float s1, s2;
     if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "IGCK", 4) != 0
         || fread(&vers, sizeof vers, 1, f) != 1
-        || vers < 1 || vers > 6
+        || vers < 1 || vers > 7
         || fread(&ctx, sizeof ctx, 1, f) != 1
         || fread(&nh, sizeof nh, 1, f) != 1
         || (vers >= 4 && fread(&nh2, sizeof nh2, 1, f) != 1)
@@ -551,6 +654,28 @@ ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out)
                     fclose(f);
                     return NULL;
                 }
+            }
+        }
+        if (vers >= 7) {
+            int64_t ln = 0;
+            free(lion_m);
+            lion_m = NULL;
+            lion_n = 0;
+            if (fread(&ln, sizeof ln, 1, f) != 1 || (ln && ln != mlp_nparams(m))) {
+                fprintf(stderr, "ig: ckpt bad Lion state\n");
+                ig_mlp_free(m);
+                fclose(f);
+                return NULL;
+            }
+            if (ln) {
+                lion_m = malloc(sizeof(float) * (size_t)ln);
+                if (!lion_m || fread(lion_m, sizeof(float), (size_t)ln, f) != (size_t)ln) {
+                    fprintf(stderr, "ig: ckpt truncated Lion state\n");
+                    ig_mlp_free(m);
+                    fclose(f);
+                    return NULL;
+                }
+                lion_n = ln;
             }
         }
         if (steps_out) *steps_out = (long)sd;

@@ -4,9 +4,11 @@ Byte-level LM, `ctx=4, hidden=96, batch=4, lr=5e-3, warmup=200, cosine,
 4000 steps, seed 42`, evaluated as val bpb on the frozen split-v0
 (800 windows; test in parens). Unigram floor: **4.74**.
 
-> **Current defaults (D7):** two-byte weights (16-bit master code, the
-> forward pass reads the high byte), low byte round-to-nearest; pure-int
-> gradients use a per-tensor pow2 absmax scale. See E7 → E8.
+> **Current defaults (D7, D8):** two-byte weights (16-bit master code,
+> the forward pass reads the high byte), low byte round-to-nearest;
+> pure-int gradients use a per-tensor pow2 absmax scale (E7 → E8).
+> Optimizer **Lion** (lr 2e-3, wd 0.1, batch 32, 16-bit momentum, E9);
+> **E1–E8 used Adam** — repro commands below pass `--opt adam`.
 >
 > **Read E7 first.** Every quantized number in E1–E6 was measured with
 > round-to-nearest parameter storage, which discarded ~98% of all weight
@@ -274,6 +276,73 @@ by default (finding 3), SR remains available as `--w2-sr`.
 Caveat: single seed for the 20k arm (each run ~10 min); differences
 ≥ 0.1 are well outside the measured seed noise, differences ≤ 0.03 are not.
 
+## E9 — Lion vs Adam (int-friendly optimizer candidate)
+
+Motivation (user): Adam loses its elegance under int scaling (two
+moments, one with ~2× the octave range of g, sqrt, division, eps/zero
+handling); Lion (Chen et al. 2023) keeps ONE state and updates by
+lr·sign(·). Accepted costs: larger batch, re-tuned hyperparameters.
+
+**Implementation** (`--opt lion`): c = β1·m + (1−β1)·g; w −= lr·(sign(c) +
+wd·w); m = β2·m + (1−β2)·g, β1 = 0.9, β2 = 0.99; decoupled `--wd` (also
+applies to Adam = AdamW). Momentum on a log grid with a per-tensor pow2
+absmax scale re-chosen each step: `--lion-m b2` (16-bit codes, RTN;
+default when quantized), `b1` (1-byte RTN), `b1sr` (1-byte SR), `f32`.
+Int view: sign(c) is a sign test plus one log-code comparison of |m| vs
+|g| (offset log(β1/(1−β1))); no sqrt, no division, no eps. Checkpoint v7
+stores m; bit-exact resume and quantized-vs-fp are ctest-guarded.
+
+**Protocol:** matched data = matched compute (scalar engine): batch 32 ×
+2500 steps (80k windows, = E8's 20k × 4) and batch 128 × 2500 steps
+(320k windows); warmup 200, cosine, seed 42, val bpb at 4 points.
+Quantized = default stack (two-byte weights, D7).
+
+| batch 32 (80k windows) | lr | val bpb |
+|---|---|---|
+| Adam fp | 5e-3 / 1e-2 / 2e-2 | 3.226 / 3.109 / **3.099** |
+| Adam quant | 5e-3 / 1e-2 | 3.230 / **3.103** |
+| Lion fp | 5e-4 / 1e-3 / 2e-3 / 4e-3 | 3.440 / 3.280 / **3.205** / 3.474 (unstable) |
+| Lion quant | 1e-3 / 2e-3 / 4e-3 | 3.299 / 3.242 / 3.440 |
+| Lion quant, wd 0.1 | 2e-3 / 3e-3 | **3.226** / 3.285 |
+| Lion pure-int | 2e-3 | 3.233 |
+| Lion m-state b1sr / b1 (RTN) | 2e-3 | 3.252 / 3.563 (freezes, as predicted) |
+| Lion fp, batch 4 × 20k steps | 5e-4 | 3.629 (small-batch failure) |
+
+| batch 128 (320k windows) | lr | val bpb |
+|---|---|---|
+| Adam fp | 1e-2 / 2e-2 | 2.900 / **2.846** |
+| Adam quant | 1e-2 / 2e-2 | 2.910 / **2.839** |
+| Lion fp | 1e-3 / 2e-3 / 3e-3 | 3.120 / **2.944** / 2.955 |
+| Lion quant, wd 0.1 | 2e-3 / 3e-3 | 2.960 / **2.958** |
+
+**Findings**
+1. **Lion trails Adam by ~0.10 bpb (fp) / ~0.12 (quantized) at matched
+   data, at batch 32 AND 128** — the gap does not shrink with batch in
+   this range. Adam reaches Lion's final b128 quality (2.944) after about
+   half the data (2.996 at 160k windows, 2.877 at 240k).
+2. Lion is quantization-robust: quant gap +0.015–0.04 with a 16-bit
+   momentum, pure-int ≈ quant. 1-byte SR momentum costs +0.01–0.03; 1-byte
+   RTN momentum freezes (β2 = 0.99 moves m 1%/step < 3.6% half-step).
+3. Lion's lr optimum is bracketed (2–3e-3, ≈ Adam's /5–/10); 4e-3 is
+   unstable. Adam's optimum is NOT bracketed (2e-2 > 1e-2 at both batch
+   sizes) — Adam is if anything under-tuned here, so the gap is not a
+   tuning artifact in Adam's favor.
+4. Batch 4 is a non-starter for Lion (3.63 vs Adam 3.11).
+5. wd 0.1 helps Lion slightly (3.242 → 3.226 at b32).
+
+**Documented Lion hyperparameters (this vehicle):** lr ≈ Adam-lr/5–10
+(2–3e-3), β1 0.9 / β2 0.99, wd 0.1, batch ≥ 32, warmup 200, cosine,
+m-state 16-bit (b2).
+
+**Decision D8 (user, 2026-11-12): Lion becomes the default optimizer,
+Adam remains available (`--opt adam`).** The ≈ 1.5–2× data cost at this
+scale is accepted for int-elegance (one state, sign update) and the
+ability to scale batch; Lion defaults: lr 2e-3, wd 0.1, batch 32 (each
+only if not given explicitly), batch < 32 warns. Caveats: 120 k-param MLP, single seed, Lion's published advantage is on
+transformers at much larger batches (≥ 4k sequences), β2 not swept.
+Re-run the matched-data comparison at M3 (transformer, realistic batch)
+and revisit D8 if the gap stays ≳ 0.1 bpb.
+
 ## Conclusions / next levers (supersedes the pre-E7 list)
 
 0. **SR on parameter storage is mandatory** (as PLAN §1 anticipated);
@@ -291,12 +360,17 @@ Caveat: single seed for the 20k arm (each run ~10 min); differences
 4. ~~Re-define the collapse metric~~ done: M5.5 gate is mass-weighted.
 5. Watch `upd subgrid/moved` in the step log; any change to weight
    storage must keep ctest `sr_train` green.
+6. **Optimizer: Lion is the default (D8)** — int-native single 16-bit
+   momentum; accepted cost ~0.1 bpb (≈ 1.5–2× data) vs Adam on this
+   vehicle at batch 32–128. Re-measure at M3. Adam (`--opt adam`) keeps
+   float moments (reference mode).
 
 ## Repro
 
 ```sh
-F="--index data/split-v0/idx.bin --ctx 4 --hidden 96 --batch 4 --lr 5e-3 \
-   --warmup 200 --eval-every 2000 --eval-windows 800 --steps 4000 --seed 42"
+# E1–E8 were run with Adam (the default before D8):
+F="--opt adam --index data/split-v0/idx.bin --ctx 4 --hidden 96 --batch 4 \
+   --lr 5e-3 --warmup 200 --eval-every 2000 --eval-windows 800 --steps 4000 --seed 42"
 ./build/ig-train $F --no-quant
 ./build/ig-train $F --scale 1024
 ./build/ig-train $F --pure-int --gscale 65536
@@ -309,4 +383,8 @@ F="--index data/split-v0/idx.bin --ctx 4 --hidden 96 --batch 4 --lr 5e-3 \
 ./build/ig-train $B --w2-sr         # two-byte weights, SR low byte
 ./build/ig-train $B --w1            # 1-byte SR (drifts +0.15)
 ./build/ig-train $B --pure-int --w2-sr
+# E9 (C = --index ... --ctx 4 --hidden 96 --warmup 200 --eval-windows 800 --seed 42)
+./build/ig-train $C --batch 128 --steps 2500 --eval-every 625 --opt adam --lr 2e-2
+./build/ig-train $C --batch 128 --steps 2500 --eval-every 625 --opt lion --lr 3e-3 --wd 0.1
+./build/ig-train $C --batch 32 --steps 2500 --eval-every 625 --opt lion --lr 2e-3 --lion-m b1sr
 ```

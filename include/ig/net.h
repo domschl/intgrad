@@ -63,7 +63,21 @@ void ig_mlp_scale_grads(ig_MLP *m, float s); /* for batch-mean loss */
  * limitation until the tensor path). Honors ig_pure_int (gradient byte
  * round-trip) and ig_quant_enabled (param grid round-trip). */
 void ig_mlp_adam_update(ig_MLP *m, float lr);
-void ig_mlp_adam_reset(void);
+void ig_mlp_adam_reset(void); /* resets ALL optimizer state (Adam + Lion) */
+
+/* Lion (E9): one momentum tensor, update lr*sign(.) — see net.c. Same
+ * conventions as Adam (ig_pure_int, ig_wd, two-byte weights). */
+void ig_mlp_lion_update(ig_MLP *m, float lr);
+#define IG_OPTQ_F32  0  /* float state (oracle) */
+#define IG_OPTQ_B2   1  /* 16-bit log codes, RTN, per-tensor pow2 absmax scale */
+#define IG_OPTQ_B1   2  /* 1-byte log codes, RTN (ablation: freezes) */
+#define IG_OPTQ_B1SR 3  /* 1-byte log codes, stochastic rounding */
+extern int ig_lion_m;   /* -1 = auto: B2 when quantized, F32 otherwise */
+int ig_lion_m_mode(void);
+/* Optimizer state currently held (e.g. after ig_mlp_load2): bit 0 = Adam
+ * moments, bit 1 = Lion momentum. */
+int ig_mlp_opt_state(void);
+extern float ig_wd;     /* decoupled weight decay, default 0 */
 
 /* Checkpoints: 'IGCK' + dims + scales + (fp32 value, byte code) per param
  * + Adam moments + run-progress state (steps done, RNG position) so a

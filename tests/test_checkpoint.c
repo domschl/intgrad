@@ -13,6 +13,7 @@
 #include "ig/value.h"
 
 #define NUP 20
+static int use_lion;
 
 static uint64_t rs = 12345;
 static uint64_t nx(void)
@@ -30,7 +31,8 @@ static void one_update(ig_MLP *m, uint8_t *win, int ctx)
     ig_Value **logits = ig_mlp_forward(m, win);
     ig_Value *loss = ig_mlp_loss(m, logits, win[ctx]);
     ig_backward(loss);
-    ig_mlp_adam_update(m, 5e-3f);
+    if (use_lion) ig_mlp_lion_update(m, 1e-3f);
+    else ig_mlp_adam_update(m, 5e-3f);
     free(logits);
     ig_reset();
 }
@@ -96,7 +98,8 @@ static int run_case(int w2)
                 diffs, checked);
         return 1;
     }
-    printf("checkpoint: resume is bit-exact over %ld params (w2=%d)\n", checked, w2);
+    printf("checkpoint: resume is bit-exact over %ld params (w2=%d lion=%d)\n",
+           checked, w2, use_lion);
     unlink(ck);
     unlink("/tmp/ig_test_ckpt_straight.bin");
     ig_mlp_free(a);
@@ -110,6 +113,9 @@ int main(void)
     if (run_case(0)) return 1;
     rs = 12345;
     ig_w2 = 1;
+    if (run_case(1)) return 1;
+    rs = 12345;
+    use_lion = 1; /* Lion momentum (16-bit grid) must resume bit-exactly */
     if (run_case(1)) return 1;
     ig_w2 = 0;
     return 0;

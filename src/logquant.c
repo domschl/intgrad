@@ -97,11 +97,11 @@ float ig_rt_w(float x) { return ig_rt2(x, g_w_delta, g_w_scale); }
 #define W16_SUB 256 /* low byte: 256 sub-steps per forward grid step */
 #define W16_MAXM (IG_MAX_CODE * W16_SUB)
 
-int16_t ig_w16_encode(float x, float u)
+int16_t ig_enc16(float x, float u, float delta, float scale)
 {
     if (!(x > 0.0f) && !(x < 0.0f)) return 0;
-    float a = fabsf(x) * g_w_scale;
-    float d16 = g_w_delta / (float)W16_SUB;
+    float a = fabsf(x) * scale;
+    float d16 = delta / (float)W16_SUB;
     float qf = log2f(1.0f + a) / d16;
     int M;
     if (u < 0.0f) {
@@ -117,12 +117,15 @@ int16_t ig_w16_encode(float x, float u)
     return (int16_t)(x < 0.0f ? -M : M);
 }
 
-float ig_w16_full(int16_t wq)
+float ig_dec16(int16_t wq, float delta, float scale)
 {
     int M = wq < 0 ? -wq : wq;
-    float m = (exp2f((float)M * g_w_delta / (float)W16_SUB) - 1.0f) / g_w_scale;
+    float m = (exp2f((float)M * delta / (float)W16_SUB) - 1.0f) / scale;
     return wq < 0 ? -m : m;
 }
+
+int16_t ig_w16_encode(float x, float u) { return ig_enc16(x, u, g_w_delta, g_w_scale); }
+float ig_w16_full(int16_t wq) { return ig_dec16(wq, g_w_delta, g_w_scale); }
 
 float ig_w16_fwd(int16_t wq)
 {
