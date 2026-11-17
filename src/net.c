@@ -8,7 +8,7 @@
 #include "ig/logquant.h"
 
 int ig_w2 = 1;      /* two-byte weights (D7) */
-int ig_w2_sr = 0;   /* SR on the low byte (not needed, E8) */
+int ig_w2_sr = 0;   /* SR on the low byte (RTN suffices) */
 int ig_sr = 1;      /* SR for one-byte storage */
 float ig_wd = 0.1f; /* Lion decoupled weight decay */
 
@@ -133,7 +133,7 @@ ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target)
     (void)m;
     /* CE is EXACT over the quantized logits and never quantized itself:
      * clamping lse and target on the same grid edge makes a confidently
-     * WRONG prediction score 0 (the E5c artifact). */
+     * WRONG prediction score 0. */
     ig_fx_mode = 2;
     ig_Value *lse = ig_logsumexp((const ig_Value **)logits, IG_VOCAB);
     ig_Value *loss = ig_sub(lse, logits[target]);

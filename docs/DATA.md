@@ -27,10 +27,6 @@ All tools live in the uv project `py/` (`cd py && uv sync --extra corpus`).
 | `data/split-v1/` | index v2 over both corpora, train/val/test buckets | 40.0 GB train |
 | `data/eval-v1/` | frozen eval set: 512 × 2 KB chunks of val (and test) + baselines | 1 MB each |
 
-`data/corpus-v0/` and `data/split-v0/` are superseded (v0 books contained
-boilerplate and encoding-variant duplicates; split-v0 uses index v1, which
-the readers no longer accept).
-
 ### corpus-v2 build
 
 ```sh
@@ -88,7 +84,7 @@ detected, 0/300 distinct books flagged.
 corpus-v2 build stats: 57,986 PG files after variant selection (31,024
 dropped), 8,921 near-duplicates dropped, 46,737 books kept; 1.10 GB footer
 + 94 MB header + 28.5 MB paragraph boilerplate removed; guard fired on 30
-books. Books shrank from ~35 GB (v0) to ~18.7 GB.
+books. Book text: ~18.7 GB (from 37 GB of raw files).
 
 ### split-v1 / index v2
 

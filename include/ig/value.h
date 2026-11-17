@@ -21,9 +21,9 @@ typedef struct ig_Value {
     /* Quantization was CLAMPED at the grid edge: d(clamp)/dx = 0 there,
      * so backprop through this node must be blocked. Without this the
      * optimizer pushes gradient into an immovable stored value (Momentum
-     * accumulates against a wall — the E4 stuck-loss floor). */
+     * accumulates against a wall and training stalls). */
     unsigned clamped : 1;
-    /* Parameters only, two-byte-weight mode (E8): 16-bit master log code;
+    /* Parameters only, two-byte-weight mode: 16-bit master log code;
      * `data` is always its high-byte (forward) value. 0 with data != 0
      * means "not yet initialized from data". */
     int16_t wq;

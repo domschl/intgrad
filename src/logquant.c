@@ -15,7 +15,7 @@ uint8_t ig_encode2(float x, float delta, float scale)
     if (!(x > 0.0f) && !(x < 0.0f)) return 0; /* 0 or NaN -> zero */
     float a = fabsf(x) * scale;
     int q = (int)lroundf(log2f(1.0f + a) / delta);
-    if (q < 1) return 0; /* faithful: no floor to code 1 (E7) */
+    if (q < 1) return 0; /* faithful: tiny values are 0, never inflated to code 1 */
     if (q > IG_MAX_CODE) q = IG_MAX_CODE;
     return (uint8_t)(x < 0.0f ? 128 + q : q);
 }

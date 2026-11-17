@@ -1,9 +1,11 @@
 # Plan 001 — Reset: byte-level toy LLM with 1-byte compute, 2-byte weights, Lion
 
-*Created 2026-11-17. Supersedes `docs/history/PLAN-v0.md`. Later plans are
-numbered `002-…`, `003-…` and build on this one. A plan is never rewritten
-after it is closed. Results are appended to its log (§8), and changes of
-direction go into the next plan.*
+*Created 2026-11-17. This is the first plan of a fresh start: earlier
+plans, experiment logs and corpora were deleted (they remain only in git
+history, up to commit `4ad56b1`). Later plans are numbered `002-…`, `003-…` and
+build on this one. A plan is never rewritten after it is closed. Results
+are appended to its log (§8), and changes of direction go into the next
+plan.*
 
 ## 0. What this project is
 
@@ -14,8 +16,8 @@ A **toy LLM** that learns to continue text, with four fixed properties:
 2. **Byte numerics.** Everything the network *computes with* (weights as
    read by the forward pass, activations, logits, optionally gradients)
    is one byte. **Parameters are stored as 1 or 2 bytes:** the default is a
-   16-bit master code whose high byte is the compute weight (old D7).
-   1-byte storage with stochastic rounding stays selectable.
+   16-bit master code whose high byte is the compute weight. 1-byte
+   storage with stochastic rounding stays selectable.
 3. **Lion optimizer.** It is the only optimizer. It gets replaced only if
    Lion turns out to be a dead end that cannot be fixed (criteria in M5).
 4. **Learnability first.** A scalable decoder-only transformer must
@@ -23,81 +25,65 @@ A **toy LLM** that learns to continue text, with four fixed properties:
    work starts. Recurrent state is the subject of plan 002. This plan
    prepares the data path for it.
 
-Out of scope (removed, recoverable from git `154876c`): the tool-use
-protocol, `ig-pretty`, the teacher/trace generator, the distillation plans,
-Adam/SGD, linear-int8 grid emulation and the GEMM hardware probes.
+Out of scope: tool use, teacher models, distillation, optimizers other
+than Lion.
 
 ---
 
-## 1. Review of the code base at `154876c`
+## 1. Starting point
 
-### 1.1 What holds (keep)
+### 1.1 Design carried over (hypotheses, not results)
 
-| Finding | Evidence | Caveat |
-|---|---|---|
-| Log-byte grid (symlog, Δ=0.1) + **clamp-aware STE** lets quantized training memorize to 0 loss | E4 | — |
-| **CE exact** over quantized logits, never quantized itself | E5c (saturation artifact) | — |
-| Exact accumulation + **one requant per output** (int32-GEMM semantics) | E7 | — |
-| **Two-byte master weights** stay within +0.01–0.03 bpb of fp over 20k steps; 1-byte SR drifts to +0.15 | E8 | 120k-param MLP, ctx 4, 1 seed |
-| **Lion** with a **16-bit momentum** is quantization-robust (+0.015–0.04); 1-byte RTN momentum freezes | E9 | same vehicle |
-| Pure-int gradients with **per-tensor pow2 absmax scale** are ≈ quant (no saturation by construction) | E7/E8 | emulated, float accumulation |
+The numerics below come from earlier small-MLP work. Those measurements
+were taken with a buggy harness (§1.2) on a 4-byte-context MLP, so they
+count only as **design hypotheses. M4 must confirm each one on the
+transformer.**
 
-All of these were measured on a 4-byte-context MLP. **Plan 001 has to
-re-confirm each one on the transformer (M4).** None of them is a law yet.
+| Design choice | Why it is believed to matter |
+|---|---|
+| Log-byte grid (symlog, Δ = 0.1) + **clamp-aware STE** | without the clamp mask, optimizers push against saturated values and training stalls |
+| **CE exact** over quantized logits, never quantized itself | clamping lse and target on one grid edge scores a confidently wrong prediction as loss 0 |
+| Exact accumulation + **one requant per output** | re-rounding partial sums swamps small terms and is order-dependent |
+| **Two-byte master weights** (forward reads the high byte) | the byte grid's 7.2% step discards most optimizer updates; 1-byte SR adds noise that grows with training |
+| **Lion** with a **16-bit momentum** | one state, sign update, no sqrt/division; a 1-byte RTN momentum freezes (β2 = 0.99 moves it < half a step) |
+| Pure-int gradients with a **per-tensor pow2 absmax scale** | saturation impossible by construction |
 
-### 1.2 Bugs and defects found in this review
+### 1.2 Defects found and fixed while setting up (M0/M1)
 
 | # | Defect | Impact | Status |
 |---|---|---|---|
-| B1 | **E-E1/E10 linear-grid mode cut the gradient graph**: `ig_value(wview(...))` made each weight a fresh leaf, so W1/W2 never learned and only the biases trained | All `lin*` results (≈4.70 bpb ≈ unigram) are invalid, so the "linear int8 costs 1.7 bpb" conclusion is wrong | code removed; question re-opened in M4 |
-| B2 | **Train sampling was uniform per document**: books are 61% of train bytes but 0.67% of documents, so a byte in a book was ~700× less likely to be seen than a byte in a wiki definition | Model trained mostly on short wiki leads | **fixed**: length-weighted sampling (`ig_ds_sample_doc`, ctest `dataset`) |
-| B3 | **Eval took one window from each of the first N val docs in index order**, which is in practice only corpus-v0 wiki definitions | "val bpb" measured wiki-defs only, at ≤800 windows (noisy) | **fixed** for now (length-weighted, seeded); proper frozen eval set in M1 |
-| B4 | `idx.bin` stores **absolute shard paths** | Index breaks if the repo moves | **fixed (M1)**: index v2, relative paths + source id |
-| B5 | Documents are joined by `"\n \n"` in shards, but the model **never sees a document boundary** (windows stay inside one doc) | Needed for sequential streaming / recurrence | **fixed (M1)**: batchers insert EOD `0x03` |
-| B6 | Scalar autograd: ~440 windows/s on a 120k-param MLP | A transformer cannot be trained on it | D2: PyTorch reference engine |
-| B7 | Experiment harness: single seeds, no frozen eval set, fp-oracle runs not paired, flags added per experiment and never removed (≈30 flags) | Conclusions flipped three times (E1–E6 invalidated by E7, E10 by B1, all numbers by B2/B3) | rules in §4.5 |
-| B8 | Untracked-but-committed files under `data/` (synthetic traces), fixtures in `data/` | Violates the "data/ is private" rule | **fixed**: `data/` fully ignored, fixtures in `tests/fixtures/` |
-| B9 | Checkpoint format accreted v1–v7 compat branches + Adam moments | Complexity | **fixed**: single format v8 |
-| B11 | **Gutenberg books duplicated**: 27 k of 50 k book ids exist as 2–4 encoding variants (`N`, `N-8`, `N-0`), and exact-hash dedup removed only 362 docs; variants also straddled the split | Books double/triple weighted, val leakage | **fixed (M1, X1)**: variant selection + near-dup fingerprints |
-| B12 | **Gutenberg boilerplate** in 95% of book docs (license headers in old formats, "End of Project Gutenberg's …" lines unmatched, credits, transcriber notes) | Training on license text | **fixed (M1, X1)**: `intgrad.corpus.gutenberg` |
-| B10 | Possible near-duplicate leakage between corpus-v0 wiki-2017 definitions and corpus-v1 wiki-2015 articles (split is by exact content hash) | Optimistic val bpb on wiki | **found and fixed (M1, X2)**: 30% of val articles had their lead in a train definition; the split now groups English wiki by title |
+| B1 | Linear-int8 grid mode made every weight a fresh graph leaf: only biases trained | old "linear int8 is worse" conclusion invalid | code removed; log vs linear re-opened in M4 |
+| B2 | Train sampling uniform per document (books: 61% of bytes, 0.67% of picks) | trained mostly on short wiki leads | fixed: length-weighted / byte-uniform |
+| B3 | Eval used one window from each of the first val docs in index order (all wiki definitions) | val bpb measured one source | fixed: eval-v1 (§4.4) |
+| B4 | `idx.bin` stored absolute shard paths | index breaks if the repo moves | fixed: index v2 |
+| B5 | The model never saw a document boundary | needed for sequential streaming / recurrence | fixed: EOD `0x03` in the batchers |
+| B6 | Scalar autograd: ~440 windows/s on a 120k-param MLP | cannot train a transformer | D2: PyTorch reference engine |
+| B7 | Harness: single seeds, no frozen eval set, unpaired fp runs, ~30 never-retired flags | conclusions flipped repeatedly | rules in §4.5 |
+| B8 | Files under `data/` tracked in git | violates the privacy rule | fixed: `data/` fully ignored |
+| B9 | Checkpoint format with v1–v7 compat branches | complexity | fixed: single format v8 |
+| B10 | Split hashed per document: 30% of val wiki articles had their lead in a train definition | optimistic wiki val bpb | fixed (X2): English wiki grouped by title |
+| B11 | 27 k of 50 k Gutenberg books stored 2–4× (encoding variants); exact dedup missed them | books over-weighted, val leakage | fixed (X1): variant selection + near-dup fingerprints |
+| B12 | Gutenberg boilerplate in 95% of books | training on license text | fixed (X1): `intgrad.corpus.gutenberg` |
 
-### 1.3 Why the experiments ran in circles
+### 1.3 Lessons (why the earlier work ran in circles)
 
-1. The **vehicle could not show the effects being asked about.** A ctx-4
-   MLP has no attention, no depth and no long-range structure, so "does
-   depth help quant", "grid choice" and so on were answered on a model whose
-   ceiling is ~2.8 bpb.
-2. **Harness bugs were found only after the conclusions** (B1–B3, E5c, E7).
-   No test layer checked that a configuration *trains at all* before it
-   was compared.
-3. **No frozen protocol**: the eval set, seeds, step budget and batch
-   changed between experiment families, so tables are not comparable
-   across E-numbers.
-4. **Flags were never retired**, so the combinatorial space kept growing
-   and each new result had to be checked against old ablations.
+1. The **vehicle could not show the effects** being asked about (no
+   attention, no depth, 4 bytes of context).
+2. **Harness bugs surfaced only after conclusions were drawn.** No test
+   layer checked that a configuration trains at all before comparing it.
+3. **No frozen protocol**: eval set, seeds and budgets changed between
+   experiment families.
+4. **Flags were never retired**, so the configuration space only grew.
 
 The rules in §4.5 address each of these.
 
-### 1.4 Cleanup done in this commit (M0)
+### 1.4 State of the code after M0
 
-- Removed: tool-use stack (`protocol.h`, `ig-pretty`, `gen_traces.py`),
-  `lingrid.[ch]` (B1), GEMM probes, Adam/SGD, `nh2`, role grids
-  (`--w-delta/--a-delta/--w-scale/--a-scale`), isolation flags
-  (`--fp-logits/--loss-fp/--fp-params`), fixed `--gscale`, `--scale`,
-  Lion momentum ablations (`b1/b1sr/f32` flags), float-stub
-  `ig_logmul/ig_logadd`, checkpoint v1–v7 branches.
-- `net.c` 742 → ~370 lines, with one `ig_mlp_groups()` helper replacing four
-  copies of the group tables.
-- Fixed B2/B3 (length-weighted sampling for train *and* eval) + new ctest
-  `dataset`. New tests in `logquant` (w16 view, SR unbiasedness, fx clamp).
-- `data/` and `runs/` fully git-ignored. Fixtures moved to `tests/fixtures/`.
-  Old run logs and checkpoints moved to the private `runs/legacy/`.
-- `docs/PLAN.md`, `docs/EXPERIMENTS.md` moved to `docs/history/` with a
-  superseded header and the B1 note.
-
-The C code is now the **numerical oracle** (`libintgrad`, `ig-train`):
-small, exact, auditable. It is not the trainer for scalable models.
+The C library (`libintgrad`, `ig-train`) is the **numerical oracle**:
+scalar autograd with the exact quantization semantics. It is small, exact
+and auditable, but it is not the trainer for scalable models. Lion only,
+one checkpoint format, `data/` and `runs/` never committed, fixtures in
+`tests/fixtures/`.
 
 ---
 
@@ -109,12 +95,12 @@ small, exact, auditable. It is not the trainer for scalable models.
 | weights (storage) | 16-bit symlog, 256 sub-steps per byte step | **2 (default)** or 1 + SR | `w2` / `w1` switch |
 | activations (layer outputs) | symlog Δ=0.1 | 1 | one requant per output after exact accumulation |
 | logits (output + attention scores) | fixed-point int8 · 0.1 (±12.7) | 1 | absolute error is what CE/softmax feel |
-| CE loss | exact | — | never quantized (E5c) |
+| CE loss | exact | — | never quantized |
 | gradients | float (default) or symlog with per-tensor pow2 absmax scale (`pure-int`) | (1) | pure-int = research flag |
 | Lion momentum | 16-bit symlog, per-tensor pow2 absmax scale | 2 | |
 | STE | 1 in range, **0 where the quantizer clamped** | — | mandatory |
 
-New for the transformer (decided in M3/M4, recorded in the §7 log):
+New for the transformer (decided in M3/M4, recorded in the §8 log):
 softmax probabilities (candidate: fixed-point u8 in [0,1], step 1/255),
 RMSNorm gain/statistics (candidate: exact statistic, requant output),
 embeddings (same as weights; tied with the output head).
@@ -124,7 +110,6 @@ embeddings (same as weights; tied with the output head).
 ```
 plan/                 numbered plans (this is 001)
 docs/DATA.md          corpus pipeline (no data in git)
-docs/history/         frozen v0 plan + experiment log
 include/ src/ tests/  C oracle: libintgrad, ig-train, ctest
 py/                   uv project `intgrad` (M1: corpus pipeline + data; M2: engine)
   intgrad/corpus/       build_shards, make_split (index v2), gutenberg (cleaner)
@@ -275,7 +260,7 @@ embedding / output head, no biases. One config scales it:
 | M | 384 | 6 | 6 | 1024 | 10.7 M |
 | L | 512 | 8 | 8 | 1024 | 25 M |
 
-Training: random batcher, Lion (lr/wd per E9 as the starting point),
+Training: random batcher, Lion (start: lr 2e-3, wd 0.1, β 0.9/0.99),
 warmup + cosine, fp32 master + TF32 matmuls in fp mode. Eval on eval-v1
 every N steps. Samples are written to `runs/` only (D5).
 
@@ -314,14 +299,14 @@ Deliverables: metric implemented, baseline numbers recorded,
 ## 6. Decisions (plan 001)
 
 - **001-D1 Scope**: toy byte-level LM. Tool use, teacher and distillation
-  are removed from the tree (git history keeps them).
+  are out of scope.
 - **001-D2 Engines**: PyTorch reference for anything scalable. The C scalar
   engine is the numerical oracle, bound to PyTorch by parity tests. C/CUDA
   int kernels are a later plan.
-- **001-D3 Numerics**: §2. Old D6 (hybrid grids, clamp STE, exact CE) and
-  D7 (2-byte master weights, 1-byte compute) carry over. 1-byte storage
+- **001-D3 Numerics**: §2: hybrid grids, clamp STE, exact CE, 2-byte master weights
+  with 1-byte compute (§1.1, to be confirmed in M4). 1-byte storage
   + SR remains selectable.
-- **001-D4 Optimizer**: Lion only (old D8). Adam removed. Replaced only on
+- **001-D4 Optimizer**: Lion only. Replaced only on
   the M5 dead-end criteria.
 - **001-D5 Data privacy**: `data/` and `runs/` are never committed. No
   corpus excerpts or model samples in docs, plans or commit messages.

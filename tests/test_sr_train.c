@@ -1,4 +1,4 @@
-/* Training-numerics regression (E7/E8): on the byte grid the relative
+/* Training-numerics regression: on the byte grid the relative
  * step is ~7%, so round-to-nearest one-byte parameter storage silently
  * discards most small updates and quantized training stalls. Stochastic rounding must keep quantized training close to the
  * float oracle — and the round-to-nearest ablation must still be clearly

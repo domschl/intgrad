@@ -65,7 +65,7 @@ include/ src/   C oracle: logquant (grids), value (autograd), net (MLP, Lion), d
 tests/          ctest: quantizer, autograd, checkpoint resume, training numerics, sampler
 py/             uv project `intgrad`: corpus pipeline (Gutenberg cleaner, shards,
                 split/index v2), batchers (random + sequential), eval set + baselines
-docs/           DATA.md; history/ = frozen v0 plan and experiment log
+docs/           DATA.md (corpus pipeline, split, batchers, eval set)
 ```
 
 License: MIT (code). Training data: not distributed.
