@@ -31,8 +31,13 @@ class Lion(torch.optim.Optimizer):
     def __init__(self, params, lr: float = 2e-3, wd: float = 0.1,
                  qc: Q.QuantConfig | None = None,
                  sr_uniform: Callable[[int, torch.device], torch.Tensor] | None = None,
-                 generator: torch.Generator | None = None):
+                 generator: torch.Generator | None = None,
+                 betas: tuple[float, float] = (0.9, 0.99)):
+        """betas default to the C oracle's (bit-exact parity only holds
+        for the defaults)."""
         super().__init__(params, dict(lr=lr, wd=wd))
+        b1, b2 = np.float32(betas[0]), np.float32(betas[1])
+        self.b = (b1, np.float32(1.0) - b1, b2, np.float32(1.0) - b2)
         self.qc = qc or Q.QuantConfig()
         self.gen = generator
         self.sr_uniform = sr_uniform or self._rand
@@ -61,7 +66,8 @@ class Lion(torch.optim.Optimizer):
                 if qc.enabled and qc.pure_int:
                     g = Q.rt8(g, Q.pow2_scale(g.abs().max()))
                 mo = st["m"]
-                c = Q._f32(B1, dev) * mo + Q._f32(OMB1, dev) * g
+                b1, omb1, b2, omb2 = self.b
+                c = Q._f32(b1, dev) * mo + Q._f32(omb1, dev) * g
                 u = torch.sign(c)
                 step = lr * (u + wd * p)
                 if not qc.enabled:
@@ -75,7 +81,7 @@ class Lion(torch.optim.Optimizer):
                     p.copy_(Q.rt8_sr(p - step, sr, qc.scale))
                 else:
                     p.copy_(Q.rt8(p - step, qc.scale))
-                mn = Q._f32(B2, dev) * mo + Q._f32(OMB2, dev) * g
+                mn = Q._f32(b2, dev) * mo + Q._f32(omb2, dev) * g
                 if qc.enabled:
                     s = Q.pow2_scale(mn.abs().max())
                     mn = Q.dec16(Q.enc16(mn, s), s)

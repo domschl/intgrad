@@ -38,6 +38,8 @@ DEFAULTS = {
     "train": {"steps": 4000, "batch": 32, "lr": 2e-3, "wd": 0.1, "warmup": 200,
               "sched": "cosine", "seed": 42, "log_every": 100, "eval_every": 0,
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
+              "telemetry_every": 0, "samples": 0, "sample_len": 1024,
+              "compile": False, "final_eval": True,
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
 }
@@ -64,7 +66,45 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
     if m["kind"] == "mlp":
         from intgrad.models.mlp import ByteMLP
         return ByteMLP(m["ctx"], m["hidden"], qc, generator=gen)
+    if m["kind"] == "transformer":
+        if qc.enabled:
+            raise ValueError("quantized transformer arrives in M4: set quant.enabled = false")
+        from intgrad.models import transformer
+        kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
+                                "stem", "stem_dim", "qkv_conv") if k in m}
+        return transformer.build(m.get("preset"), **kw)
     raise ValueError(f"unknown model kind {m['kind']!r}")
+
+
+def context_len(cfg: dict, model) -> int:
+    return model.ctx if cfg["model"]["kind"] == "mlp" else model.T
+
+
+def param_groups(model, wd: float) -> list[dict]:
+    """Weight decay on matrices (incl. embeddings), none on gains/biases."""
+    mats = [p for p in model.parameters() if p.ndim >= 2]
+    vecs = [p for p in model.parameters() if p.ndim < 2]
+    if cfg_is_mlp(model):                      # C-oracle parity: wd everywhere
+        return [{"params": list(model.parameters()), "wd": wd}]
+    return [{"params": mats, "wd": wd}, {"params": vecs, "wd": 0.0}]
+
+
+def cfg_is_mlp(model) -> bool:
+    from intgrad.models.mlp import ByteMLP
+    return isinstance(model, ByteMLP)
+
+
+def utf8_valid_fraction(samples: list[bytes]) -> float:
+    """Share of samples that decode as UTF-8 (a truncated final character
+    at the end of a sample is allowed)."""
+    ok = 0
+    for b in samples:
+        try:
+            b.decode("utf-8")
+            ok += 1
+        except UnicodeDecodeError as e:
+            ok += e.start >= len(b) - 3 and e.reason == "unexpected end of data"
+    return ok / max(len(samples), 1)
 
 
 def lr_at(step: int, t: dict) -> float:
@@ -115,14 +155,18 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             "eval": json.loads((ev_path / "meta.json").read_text())["val"]["blake2b"],
             "created": int(time.time())}, indent=2) + "\n")
 
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     torch.manual_seed(t["seed"])
     gen = torch.Generator().manual_seed(t["seed"])
     qc = QuantConfig(**q)
     model = build_model(cfg, qc, gen).to(dev)
     sr_gen = torch.Generator(device=dev).manual_seed(t["seed"] + 1)
-    opt = Lion(model.parameters(), lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen)
+    opt = Lion(param_groups(model, t["wd"]), lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen)
     ix = data.Index(idx_path)
-    ctx = cfg["model"]["ctx"]
+    ctx = context_len(cfg, model)
+    is_mlp = cfg_is_mlp(model)
+    fwd = torch.compile(model) if t["compile"] else model
     batcher = data.RandomBatcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"])
     ev = EvalSet(ev_path, "val")
     start = 0
@@ -143,15 +187,28 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             g["lr"] = lr
         b = batcher.next()
         x = torch.from_numpy(b.x).to(dev, non_blocking=True)
-        y = torch.from_numpy(b.y[:, -1].astype("int64")).to(dev)
-        logits = model(x)
-        loss = F.cross_entropy(logits, y)
+        if is_mlp:
+            y = torch.from_numpy(b.y[:, -1].astype("int64")).to(dev)
+            loss = ce = F.cross_entropy(fwd(x), y)
+        else:
+            y = torch.from_numpy(b.y).to(dev, non_blocking=True)
+            loss, ce = model.loss(fwd(x), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-        if step % t["log_every"] == 0 or step == t["steps"] - 1:
-            last = {"step": step, "lr": lr, "loss": loss.item(), "time": round(time.time() - t0, 1)}
+        if step % t["log_every"] == 0 or step == end - 1:
+            el = time.time() - t0
+            seen = (step + 1 - start) * t["batch"] * (1 if is_mlp else ctx)
+            last = {"step": step, "lr": lr, "loss": loss.item(), "ce_bits": ce.item() / math.log(2),
+                    "time": round(el, 1), "kB_per_s": round(seen / max(el, 1e-9) / 1e3, 1)}
             log.write(json.dumps(last) + "\n")
+            log.flush()
+        if t["telemetry_every"] and not is_mlp and (step % t["telemetry_every"] == 0 or step == end - 1):
+            from intgrad.models.transformer import Tap
+            tap = Tap()
+            with torch.no_grad():
+                model(x[: max(1, len(x) // 4)], tap=tap)
+            log.write(json.dumps({"step": step, "telemetry": tap.stats}) + "\n")
             log.flush()
         if t["eval_every"] and (step + 1) % t["eval_every"] == 0 and step + 1 < t["steps"]:
             r = evaluate(model, ev, dev)
@@ -163,6 +220,15 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
                 "step": end}, run_dir / "ckpt.pt")
     final = evaluate(model, ev, dev) if t.get("final_eval", True) else {"bpb": float("nan"), "se": 0.0}
     log.write(json.dumps({"step": end, "eval": final, "final": end == t["steps"]}) + "\n")
+    if t["samples"] and not is_mlp:
+        g = torch.Generator(device=dev).manual_seed(t["seed"])
+        prompt = torch.full((t["samples"], 1), data.EOD, dtype=torch.uint8, device=dev)
+        smp = model.sample(prompt, t["sample_len"], generator=g).cpu().numpy()
+        blobs = [bytes(r) for r in smp]
+        (run_dir / "samples.bin").write_bytes(b"".join(r + b"\x03\n" for r in blobs))
+        final["utf8_valid"] = utf8_valid_fraction(blobs)
+        log.write(json.dumps({"step": end, "samples": t["samples"],
+                              "utf8_valid": final["utf8_valid"]}) + "\n")
     log.close()
     print(f"{run_dir.name}: final val {final['bpb']:.4f} ± {final['se']:.4f} "
           f"({time.time() - t0:.0f}s)", flush=True)

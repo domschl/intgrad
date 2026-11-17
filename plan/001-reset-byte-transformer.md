@@ -28,6 +28,16 @@ A **toy LLM** that learns to continue text, with four fixed properties:
 Out of scope: tool use, teacher models, distillation, optimizers other
 than Lion.
 
+**Project direction (user, 2026-11-17).** We cannot train a competitive
+model on this hardware, so the goal is a *small* model that trains within
+these constraints: a **cognitive core**. The focus is not on storing lots
+of knowledge but on learning the essence of reasoning. Two facets will be
+explored: **recurrence** and **memory**. The **interface for those
+experiments is the latent space in the middle of the transformer stack**
+(between blocks L/2−1 and L/2). The M3 model exposes it as `mid_hook`
+(read or replace `h_mid` [B, T, d]), and range telemetry includes `h_mid`.
+Plan 002 builds on this.
+
 ---
 
 ## 1. Starting point
@@ -308,6 +318,26 @@ first run:
 - an early **Lion lr × wd sweep** on XS (3 × 3, P1/P2 and 2k-step bpb),
   pulled forward from M5.
 
+**Architecture variants (001-D11, data decides).** Run at ≈ equal
+parameter count on S (2 seeds each), scored on eval-v1 overall and per
+source (German wiki has the most multi-byte characters), with probes
+P2/P3 and the range telemetry:
+- (a) plain tied embedding (baseline);
+- (b) **conv stem**: 256 × 32 byte embedding → causal conv 32 → d
+  (kernel 4) → residual causal depthwise conv (kernel 4, dilation 2),
+  receptive field 7 bytes; untied output head d → 256;
+- (c) **Primer-style**: causal depthwise conv (kernel 3) on q, k and v in
+  every block;
+- (d) **width vs depth**: d 256 × 4 layers vs d 192 × 7 layers (H 4 / 3,
+  head width 64 in both; equal 12·L·d² budget).
+
+All convolutions are causal: position t sees bytes ≤ t only. Strided
+(patching) and hourglass variants stay plan-002 candidates.
+
+**P3 is multi-query associative recall (MQAR).** The single-query version
+was not learned within 10k steps by either Lion or AdamW (29% on 8 pairs,
+X7); with several queries per sequence the supervision is dense enough.
+
 Acceptance (fp mode): P2, P3, P4 pass at XS/S; the ladder is monotone at a
 fixed byte budget; S beats xz and the 5-gram on eval-v1; throughput
 measured and recorded (estimate: S ≥ 300 kB/s on the 4070 Ti).
@@ -402,6 +432,9 @@ Deliverables: metric implemented, baseline numbers recorded,
   reserved bytes for now.
 - **001-D8 Eval protocol**: eval-v1 (§4.4) is the only number that goes
   into result tables. Test is evaluated only at plan close.
+- **001-D11 Architecture variants are decided by data (user decision).**
+  Conv stem, Primer-style q/k/v convolutions and width vs depth run as M3
+  comparisons (§5 M3). We keep what measurably helps.
 - **001-D10 Learned quantization scales are an M4 experiment (user
   decision).** TQT/LSQ-style learned pow2 scales vs delayed absmax, with
   oscillation handled by Lion momentum, latent EMA or hysteresis
@@ -521,6 +554,32 @@ quantization: hidden values beyond the fixed ±26 window die under the
 clamp-masked STE. Clamped logits are mostly harmless, since the target
 pins at the top and the rest at the bottom. Countermeasures: 001-D9, M3
 magnitude control, M4 per-tensor scaling.
+
+**X7 — Associative recall: Lion hyperparameters, not Lion (2026-11-17).**
+Q: why does the recall probe P3 fail? XS transformer, fp, trained from
+scratch on the probe task, greedy accuracy on fresh sequences.
+- Single-query recall (8 pairs, one supervised answer per sequence):
+  Lion 22–30% and AdamW 26–30%, even after 10k steps at batch 256–4096.
+  With 2 pairs AdamW reaches 100% and Lion 55–76%. Verdict: the probe was
+  too sparse to be a useful test → replaced by MQAR (all keys queried).
+- MQAR, 8 pairs: Lion with the inherited β (0.9, 0.99) reaches 26–46% at
+  lr 1e-4 … 3e-3, wd 0 or 0.1, batch 128 or 512, up to 20k steps.
+  **AdamW lr 1e-3: 100% in 5k steps.** That is the trigger for revisiting
+  Lion (001-D9), so Lion got its paper's recommended operating point:
+
+| Lion (5k steps) | β | batch | MQAR acc |
+|---|---|---|---|
+| lr 1e-4 / 3e-4 | 0.9, 0.99 | 128 | 0.45 / 0.46 |
+| lr 1e-4 / 3e-4 | **0.95, 0.98** | 128 | **0.76** / 0.46 |
+| lr 3e-4 | 0.9, 0.99 | 512 | 0.46 |
+| **lr 1e-4** | **0.95, 0.98** | **512** | **1.00** |
+
+Verdict: the inherited β2 = 0.99 is too slow for abrupt, sparse learning
+signals, and Lion needs a larger effective batch than AdamW. Lion is not
+a dead end. P3 now runs at lr 1e-4, β (0.95, 0.98), batch 512, 5k steps.
+The transformer defaults follow from the corpus lr × wd × β sweep (M3).
+Note for M4: the C oracle hard-codes β (0.9, 0.99); it needs
+configurable betas before quantized parity runs at other values.
 
 ## 9. Risks
 
