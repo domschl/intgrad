@@ -52,7 +52,7 @@ static float qz(float x)
 {
     if (!ig_quant_enabled) return x;
     if (ig_fx_mode == 2) return x; /* int32-accumulator emulation: no requant */
-    return ig_fx_mode ? ig_fx_roundtrip(x) : ig_rt_act(x);
+    return ig_fx_mode ? ig_fx_roundtrip(x) : ig_roundtrip(x);
 }
 
 /* True iff quantizing x would clamp at the grid edge (vs. round normally).
@@ -60,9 +60,7 @@ static float qz(float x)
 static int grid_clamped(float x, int fx)
 {
     if (fx) return fabsf(x) > 127.0f * ig_get_fxstep();
-    float d, s;
-    ig_get_role_grid("act", &d, &s);
-    return fabsf(x) > ig_max_abs(d, s);
+    return fabsf(x) > ig_max_abs(IG_DELTA, ig_get_scale());
 }
 
 static int qz_clamped(float x)
@@ -89,7 +87,7 @@ ig_Value *ig_value_persist(float x)
 {
     ig_Value *v = calloc(1, sizeof *v);
     if (!v) { fprintf(stderr, "ig: out of memory\n"); exit(1); }
-    v->data = ig_quant_enabled ? ig_rt_w(x) : x; /* params live on the w grid */
+    v->data = ig_quant_enabled ? ig_roundtrip(x) : x; /* params live on the grid */
     return v;
 }
 
@@ -214,7 +212,7 @@ ig_Value *ig_requant(ig_Value *a, int grid)
     ig_fx_mode = sav;
     if (ig_quant_enabled) { /* ... then exactly one quantization */
         int fx = grid == IG_GRID_FX;
-        v->data = fx ? ig_fx_roundtrip(a->data) : ig_rt_act(a->data);
+        v->data = fx ? ig_fx_roundtrip(a->data) : ig_roundtrip(a->data);
         v->clamped = grid_clamped(a->data, fx);
     } else {
         v->data = a->data;

@@ -1,8 +1,10 @@
-# intgrad — Training Data (D4/D5)
+# intgrad — Training Data
 
-> **Never `git add` anything under `data/`** — much of it is not openly
-> licensed; research-only per Decision D5. The repo stores *pipeline code*,
-> not data. `.gitignore` enforces this (`data/*`, allow `data/sample.txt`).
+> **`data/` is private and is never committed** (plan/001 D5). Much of it is
+> not openly licensed (research use only). The repo stores *pipeline code*,
+> not data. `.gitignore` ignores `data/` and `runs/` with no exceptions.
+> Repo-authored fixtures live in `tests/fixtures/`. Do not quote corpus text
+> or model samples in docs, plans or commit messages.
 
 ## What is on this machine (corpus v0)
 
@@ -14,7 +16,6 @@
 | PG mirror — curated copy in repo data dir | `data/raw/gutenberg-mirror/` | 37 GB | 89,010 books, 50 KB–15 MB filter | as above |
 | WMT15 en⇄fr parallel | `$CORPORA/WMT15/` | ~4 GB | translation pairs (giga-fren + testsets) | research use; for later translation/multilinguality eval |
 | enwiki/dewiki 2015 full-article dumps | `$CORPORA/Wikipedia/` | 12 GB bz2 (+54 GB extracted en) | full wiki articles, XML | CC BY-SA; needs an XML/markup extractor adapter (M4+) — far richer than defs-only |
-| Teacher tool traces (generated) | `tools/gen_traces.py` → `data/traces.jsonl` | on demand | agent trajectories w/ rejection sampling | ours |
 
 ## corpus-v0 build (done)
 
@@ -28,8 +29,9 @@ uv run tools/build_shards.py \
 ```
 
 Builder: `tools/build_shards.py` (uv, PEP 723 → pulls lxml). Guarantees:
-* **Protocol-safe payload (D2):** all C0 control bytes except `\t`/`\n`
-  stripped (this includes every ESC-marker byte); `\r` normalized to `\n`.
+* **Control-free payload:** all C0 control bytes except `\t`/`\n`
+  stripped; `\r` normalized to `\n`. The control range is reserved for
+  in-band markers (plan/001 D7: `0x03` end-of-document, `0x00` padding).
 * **Encoding normalized:** ascii/latin-1/cp1252 → UTF-8 (byte-level model
   must see consistent encodings).
 * **PG boilerplate removed** (old and new header/footer variants).
@@ -61,36 +63,27 @@ uv run tools/build_shards.py --out data/corpus-v1-wiki \
 | Protocol-byte scan | 0 marker bytes in sampled shards |
 | Runtime | ~25 min total (de 5.5 GB + en 13 GB) |
 
-## Next data moves (in order)
+## Split and sampling
 
-1. ~~Write `--wiki-xml` adapter~~ **DONE** — full enwiki+dewiki 2015 dumps
-   → `data/corpus-v1-wiki/` (adapter: ns0 only, no redirects/disambigs,
-   template/table/ref/link stripping, bz2 auto-detect, `LANG=PATH` specs,
-   post-build manifest `verify` step must report `problems: 0`).
-   Known v1 stripper artifacts: rare `[ ]` residues, template-glitch word
-   joins — acceptable at scale; improve if val-bpb stalls.
-   ~~NOTE: corpus-v0 manifest offset bug~~ **v0 rebuilt & re-verified**
-   (5,311,756 docs, `verify problems: 0`, protocol scan clean). Rebuild
-   also fixed: UTF-8 BOMs stripped; "Produced by …" credit paragraphs that
-   sit *after* the START marker removed; all docs `strip()`ped at ingest
-   (invariant: docs never start/end with whitespace → SEP boundaries
-   unambiguous, enforced by verify).
-   Known residual v0 front-matter artifacts (per-book, low frequency,
-   documented not chased): "Transcriber's Notes:" blocks, publisher
-   catalogs, "E-text prepared by" credit wording variants, `[Illustration:`
-   marks. Quality filters (DATA.md step list) are the right tool if these
-   show up in bad generations.
-2. **Multilingual Latin corpus v1**: PG mirror already carries de/fr/es/it/
-   pt/nl books (detector keeps them); optionally add FineWeb-2 / OSCAR
-   slices via `uv run --with datasets …` when prose diversity beyond
-   books is needed.
-3. **Dialogue SFT**: Infinity-Instruct / OpenHermes / OpenAssistant-style
-   sets via HF (`uv run --with datasets`), converted to the protocol
-   byte-stream (D2) with loss masks on assistant turns.
-4. **Tool SFT**: scale `tools/gen_traces.py` against the local teacher
-   (D3), replay-filter, plus ToolACE/xLAM/ToolBench for variety.
-5. **Val/test shards**: freeze held-out splits *before* any further
-   augmentation; pin them by hash in the manifest.
+`tools/make_split.py` builds `data/split-v0/` (blake2b content buckets,
+1‰ val / 1‰ test; `idx.bin` consumed by `src/dataset.c`). Train shares by
+bytes: books ≈ 61%, wiki articles ≈ 33%, wiki definitions ≈ 6%. Documents
+are sampled **proportional to their length** (every byte equally likely).
+Uniform-per-document sampling, used before plan/001, over-weighted short
+wiki definitions about 700× relative to books.
+
+Planned (plan/001 M1): index v2 with relative paths and a per-doc source
+id, a sequential (document-continuous) batcher for recurrent-state work,
+and a frozen eval set (eval-v1) with baselines.
+
+## Known corpus artifacts
+
+- v1 wiki stripper: rare `[ ]` residues and template-glitch word joins.
+- v0 books: occasional "Transcriber's Notes", catalogs, `[Illustration:`
+  marks. Add quality filters if they show up in generations.
+- corpus-v0 wiki-2017 definitions and corpus-v1 wiki-2015 articles cover
+  the same topics; the split is by exact hash only. A spot check found no
+  exact overlap, and a near-duplicate check is scheduled (plan/001 M1).
 
 ## uv policy
 

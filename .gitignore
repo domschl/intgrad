@@ -1,24 +1,24 @@
-build/
-build-dbg/
+# ---------------------------------------------------------------------------
+# PRIVATE: data/ is never committed, no exceptions. Much of it is not openly
+# licensed (research use only). The repo holds pipeline code only; test
+# fixtures authored for this repo live in tests/fixtures/.
+# (No trailing comments after patterns: gitignore treats them as pattern text.)
+# ---------------------------------------------------------------------------
+/data/
+# run outputs (logs, checkpoints, samples) are derived from private data
+/runs/
+
+# build trees
+/build*/
 compile_commands.json
 .cache/
 *.o
 *.d
 
-# ---------------------------------------------------------------------------
-# Training data: NEVER commit. Much of it is not openly licensed
-# (research-only per Decision D5); the repo stores pipeline code only.
-# ---------------------------------------------------------------------------
-# (gitignore has no trailing comments: a "# ..." after a pattern becomes
-# part of the pattern, which silently broke these exceptions before.)
-data/*
-# small synthetic corpus, authored for this repo (MIT)
-!data/sample.txt
-# tiny memorization probe corpus, authored for this repo (MIT)
-!data/overfit.txt
-.DS_Store
-._*
+# python
 __pycache__/
 .venv/
-build-cuda/
-tools/gemm_probe_cuda
+*.egg-info/
+
+.DS_Store
+._*

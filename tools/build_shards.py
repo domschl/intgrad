@@ -10,9 +10,10 @@ Output layout (data/corpus-<name>/):
                        "docs": [{"off","len","src"}]}
   dataset.json         {"version", "created", "separator", "stats"}
 
-Guarantees for the byte-level trainer + control-byte protocol (D2):
-  * payload never contains ESC (0x00) or other protocol marker bytes
-    (they are stripped; \\t kept, \\r normalized to \\n)
+Guarantees for the byte-level trainer:
+  * payload contains no C0 control bytes except \\t and \\n (all others are
+    stripped, \\r is normalized to \\n) -- keeps the control range free for
+    in-band markers (document boundaries, future special bytes)
   * exact-duplicate documents dropped (blake2b-128)
   * per-document provenance recorded (source path / kind)
 
@@ -44,14 +45,14 @@ import time
 from pathlib import Path
 
 SEP = b"\n \n"
-# All protocol marker bytes (0x00, 0x0B, 0x0C, 0x1C..0x1F) are C0 controls;
-# we delete every C0 control except \t/\n, which covers them all.
+# Delete every C0 control except \t/\n: the control range stays reserved
+# for in-band markers the trainer may insert.
 _DELETE = bytes(i for i in range(0x20) if i not in (0x09, 0x0A))
 
 
 def sanitize(raw: bytes) -> bytes:
     b = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    return b.translate(None, _DELETE)  # C-speed strip of protocol/control bytes
+    return b.translate(None, _DELETE)  # C-speed strip of control bytes
 
 
 PG_STARTS = (b"*** START OF", b"***START OF", b"*** START",

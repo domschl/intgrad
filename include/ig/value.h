@@ -3,7 +3,8 @@
  * each forward result is passed through the byte round-trip so the network
  * learns to be robust to its own integer arithmetic.
  *
- * Gradients are accumulated in float and quantized on parameter update.
+ * Gradients are accumulated in float; in pure-int mode they are quantized
+ * before the optimizer sees them.
  */
 #ifndef IG_VALUE_H
 #define IG_VALUE_H
@@ -31,8 +32,8 @@ typedef struct ig_Value {
 /* Toggle quantization on/off (off = exact float mode, used for gradient checks). */
 extern int ig_quant_enabled;
 
-/* D1: pure-int mode. Gradients are quantized to the log-byte grid (at
- * ig_get_gscale()) before they touch the weights, so the whole
+/* D1: pure-int mode. Gradients are quantized to the log-byte grid (with a
+ * per-tensor power-of-two absmax scale) before they touch the weights, so the whole
  * value->gradient->update path is byte-representable. Reference mode: the
  * float accumulation inside this file emulates an int accumulator; the
  * true int-domain accumulator arrives with the tensor path (M5.5). */
@@ -45,8 +46,8 @@ extern int ig_pure_int;
  *       int32 GEMM accumulator; the caller requantizes once at the end. */
 extern int ig_fx_mode;
 
-/* Graph arena. ig_reset() frees ALL intermediate values (params must live
- * outside the arena, i.e. created before... no: params use ig_value_persist()). */
+/* Graph arena. ig_reset() frees ALL intermediate values; parameters live
+ * outside the arena (ig_value_persist). */
 void        ig_reset(void);                 /* free arena intermediates */
 ig_Value   *ig_value(float x);              /* leaf, arena-allocated */
 ig_Value   *ig_value_persist(float x);      /* leaf, malloc (for parameters) */

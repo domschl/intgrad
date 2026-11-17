@@ -1,3 +1,10 @@
+> **FROZEN (2026-11-17).** Historical log of the scalar-engine MLP era.
+> What survives is summarized in plan/001 §1. Flags used in the repro
+> commands below (`--opt adam`, `--scale`, `--gscale`, `--no-sr`,
+> `--fp-*`, `--w-delta`, `--hidden2`, `--wgrid/--agrid`) were removed.
+> Numbers were measured with uniform-per-document sampling (see E-E1 note
+> at the end and plan/001 §1.3), so they are comparable only to each other.
+
 # intgrad — Experiment log
 
 Byte-level LM, `ctx=4, hidden=96, batch=4, lr=5e-3, warmup=200, cosine,
@@ -388,3 +395,14 @@ F="--opt adam --index data/split-v0/idx.bin --ctx 4 --hidden 96 --batch 4 \
 ./build/ig-train $C --batch 128 --steps 2500 --eval-every 625 --opt lion --lr 3e-3 --wd 0.1
 ./build/ig-train $C --batch 32 --steps 2500 --eval-every 625 --opt lion --lr 2e-3 --lion-m b1sr
 ```
+
+## E-E1 / E10 — linear int8 grids: INVALID (bug found in review, 2026-11-17)
+
+The E10 matrix (`lin*` runs ≈ 4.70 val bpb ≈ unigram floor, vs log grid
+2.95 and fp 2.95) was **not** a measurement of linear int8. In linear-grid
+mode `ig_mlp_forward` wrapped every weight in a *fresh leaf node*
+(`ig_value(wview(...))`), so W1/W2 never received gradients — only the
+biases trained (hence "unigram-level" bpb and `moved 100%` from weight
+decay alone). The comparison of log vs linear grids is therefore
+**open**; it is re-scheduled in plan/001 (M4) on the PyTorch reference.
+The code was removed in the plan/001 cleanup.

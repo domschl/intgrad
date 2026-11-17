@@ -101,14 +101,23 @@ ig_Dataset *ig_ds_load(const char *index_path)
             goto fail;
         }
     }
-    ds->val_ids = malloc(sizeof(size_t) * (ds->n_val ? ds->n_val : 1));
-    ds->test_ids = malloc(sizeof(size_t) * (ds->n_test ? ds->n_test : 1));
-    if (!ds->val_ids || !ds->test_ids) goto fail;
-    size_t iv = 0, it = 0;
+    size_t cnt[3] = { ds->n_train, ds->n_val, ds->n_test };
+    for (int b = 0; b < 3; b++) {
+        ds->bucket[b].ids = malloc(sizeof(uint32_t) * (cnt[b] ? cnt[b] : 1));
+        ds->bucket[b].cum = malloc(sizeof(uint64_t) * (cnt[b] ? cnt[b] : 1));
+        if (!ds->bucket[b].ids || !ds->bucket[b].cum) goto fail;
+    }
+    if (ds->ndocs > UINT32_MAX) {
+        fprintf(stderr, "ig-ds: too many docs for u32 ids\n");
+        goto fail;
+    }
     for (size_t i = 0; i < ds->ndocs; i++) {
-        uint8_t bucket = idx[pos + i * DOC_REC + 12];
-        if (bucket == 1) ds->val_ids[iv++] = i;
-        else if (bucket == 2) ds->test_ids[it++] = i;
+        const uint8_t *r = idx + pos + i * DOC_REC;
+        ig_Bucket *bk = &ds->bucket[r[12]];
+        bk->bytes += rd32(r + 8);
+        bk->ids[bk->n] = (uint32_t)i;
+        bk->cum[bk->n] = bk->bytes;
+        bk->n++;
     }
     return ds;
 
@@ -127,8 +136,10 @@ void ig_ds_free(ig_Dataset *ds)
         }
         free(ds->files);
     }
-    free(ds->val_ids);
-    free(ds->test_ids);
+    for (int b = 0; b < 3; b++) {
+        free(ds->bucket[b].ids);
+        free(ds->bucket[b].cum);
+    }
     if (ds->idx) munmap((void *)ds->idx, ds->idx_len);
     free(ds);
 }
@@ -157,25 +168,36 @@ static int doc_at(const ig_Dataset *ds, size_t di, int want_bucket,
     return 0;
 }
 
-int ig_ds_train_doc(const ig_Dataset *ds, uint64_t *rng, int min_len,
-                    const uint8_t **out, uint32_t *out_len)
+int ig_ds_sample_doc(const ig_Dataset *ds, int bucket, uint64_t *rng,
+                     int min_len, const uint8_t **out, uint32_t *out_len)
 {
-    if (!ds->n_train) return -1;
+    if (bucket < 0 || bucket > 2) return -1;
+    const ig_Bucket *bk = &ds->bucket[bucket];
+    if (!bk->n || !bk->bytes) return -1;
     for (int tries = 0; tries < 128; tries++) {
-        size_t di = (size_t)(ig_splitmix64(rng) % ds->ndocs);
-        if (doc_at(ds, di, 0, out, out_len) == 0 && (int)*out_len >= min_len)
+        uint64_t u = ig_splitmix64(rng) % bk->bytes;
+        size_t lo = 0, hi = bk->n - 1; /* first i with cum[i] > u */
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            if (bk->cum[mid] > u) hi = mid;
+            else lo = mid + 1;
+        }
+        if (doc_at(ds, bk->ids[lo], bucket, out, out_len) == 0
+            && (int)*out_len >= min_len)
             return 0;
     }
     return -1;
 }
 
+int ig_ds_train_doc(const ig_Dataset *ds, uint64_t *rng, int min_len,
+                    const uint8_t **out, uint32_t *out_len)
+{
+    return ig_ds_sample_doc(ds, 0, rng, min_len, out, out_len);
+}
+
 int ig_ds_eval_doc(const ig_Dataset *ds, int bucket, size_t i,
                    const uint8_t **out, uint32_t *out_len)
 {
-    const size_t *ids;
-    size_t n;
-    if (bucket == 1) { ids = ds->val_ids; n = ds->n_val; }
-    else { ids = ds->test_ids; n = ds->n_test; }
-    if (i >= n) return -1;
-    return doc_at(ds, ids[i], bucket, out, out_len);
+    if (bucket < 1 || bucket > 2 || i >= ds->bucket[bucket].n) return -1;
+    return doc_at(ds, ds->bucket[bucket].ids[i], bucket, out, out_len);
 }

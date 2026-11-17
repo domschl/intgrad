@@ -57,10 +57,29 @@ int main(void)
     assert(ig_encode(1e9f) < 128);
     assert(ig_decode(ig_encode(1e9f)) > 20.0f);
 
-    /* log-domain helpers agree with float arithmetic */
-    uint8_t a = ig_encode(2.0f), b = ig_encode(3.0f);
-    assert(fabsf(ig_decode(ig_logmul(a, b)) - 6.0f) < 0.4f);
-    assert(fabsf(ig_decode(ig_logadd(a, b)) - 5.0f) < 0.4f);
+    /* two-byte weights: the forward view is exactly the 1-byte grid value,
+     * and the 16-bit view resolves far finer than one byte step */
+    for (float x = -3.0f; x < 3.0f; x += 0.137f) {
+        int16_t wq = ig_w16_encode(x, -1.0f);
+        assert(ig_w16_fwd(wq) == ig_roundtrip(ig_w16_full(wq)));
+        if (fabsf(x) > 0.05f) assert(fabsf(ig_w16_full(wq) - x) < 3e-4f * fabsf(x));
+    }
+
+    /* stochastic rounding is unbiased: E[rt_sr(x)] ~= x */
+    {
+        double acc = 0.0;
+        uint32_t r = 1;
+        const int N = 20000;
+        for (int i = 0; i < N; i++) {
+            r = r * 1664525u + 1013904223u;
+            acc += ig_roundtrip_sr(0.3f, (float)(r >> 8) / 16777216.0f);
+        }
+        assert(fabs(acc / N - 0.3) < 0.002);
+    }
+
+    /* fixed-point logit grid clamps symmetrically-ish at ±12.7 / -12.8 */
+    assert(fabsf(ig_fx_roundtrip(100.0f) - 12.7f) < 1e-4f);
+    assert(fabsf(ig_fx_roundtrip(0.04f)) < 1e-6f);
 
     puts("logquant: all tests passed");
     return 0;

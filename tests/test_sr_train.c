@@ -1,11 +1,10 @@
-/* Training-numerics regression (E7): on the byte grid, Adam steps are
- * ~0.1% of |w| while the grid step is ~7%, so round-to-nearest parameter
- * storage silently discards nearly every update and quantized training
- * stalls. Stochastic rounding must keep quantized training close to the
+/* Training-numerics regression (E7/E8): on the byte grid the relative
+ * step is ~7%, so round-to-nearest one-byte parameter storage silently
+ * discards most small updates and quantized training stalls. Stochastic rounding must keep quantized training close to the
  * float oracle — and the round-to-nearest ablation must still be clearly
  * worse (otherwise this test no longer guards the bug class).
  *
- * Small, deterministic: train the byte-MLP on data/sample.txt, then report
+ * Small, deterministic: train the byte-MLP (Lion) on tests/fixtures/sample.txt, then report
  * mean CE over every window of the file (quantized forward for quant runs).
  */
 #include <math.h>
@@ -20,7 +19,7 @@
 #define NH 32
 #define STEPS 800
 #define BATCH 2
-#define LR 1e-2f
+#define LR 3e-3f /* Lion */
 #define WARMUP 100
 
 static uint64_t rs;
@@ -30,7 +29,6 @@ static uint64_t nx(void)
     return rs;
 }
 
-static int use_lion;
 
 static double run(const uint8_t *d, size_t n, int quant, int sr, int w2)
 {
@@ -39,7 +37,7 @@ static double run(const uint8_t *d, size_t n, int quant, int sr, int w2)
     ig_w2 = w2;
     ig_w2_sr = sr;    /* two-byte mode: low byte */
     rs = 0xDEADBEEFull;
-    ig_mlp_adam_reset();
+    ig_mlp_opt_reset();
     ig_MLP *m = ig_mlp_new(CTX, NH, 42);
     for (int s = 0; s < STEPS; s++) {
         float lr = s < WARMUP ? LR * (float)(s + 1) / WARMUP
@@ -53,8 +51,7 @@ static double run(const uint8_t *d, size_t n, int quant, int sr, int w2)
             free(lg);
         }
         ig_mlp_scale_grads(m, 1.0f / BATCH);
-        if (use_lion) ig_mlp_lion_update(m, lr * 0.3f); /* Lion: ~3x lower lr */
-        else ig_mlp_adam_update(m, lr);
+        ig_mlp_lion_update(m, lr);
         ig_reset();
     }
     double tot = 0.0;
@@ -98,16 +95,6 @@ int main(void)
     if (w2sr > fp + 0.35 || w2rtn > fp + 0.35) {
         fprintf(stderr, "FAIL: two-byte weights (SR %.3f / RTN %.3f) not within"
                         " 0.35 of fp %.3f\n", w2sr, w2rtn, fp);
-        return 1;
-    }
-    /* Lion (E9): quantized (two-byte weights, 16-bit momentum) must track
-     * its float oracle. */
-    use_lion = 1;
-    double lfp = run(d, n, 0, 1, 0);
-    double lq = run(d, n, 1, 0, 1);
-    printf("sr_train: Lion CE nats  fp %.3f  quant (w2, m b2) %.3f\n", lfp, lq);
-    if (lq > lfp + 0.35) {
-        fprintf(stderr, "FAIL: Lion quantized %.3f not within 0.35 of fp %.3f\n", lq, lfp);
         return 1;
     }
     free(d);

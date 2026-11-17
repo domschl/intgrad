@@ -1,7 +1,7 @@
 /* Checkpoint state-fidelity regression: a run of 20 updates must produce
  * bit-identical parameters whether executed straight through or as
- * 10 steps + save + resume + 10 steps. Guards params, Adam moments,
- * step counters and RNG continuity (the v1/v2/v3 format bug class). */
+ * 10 steps + save + resume + 10 steps. Guards params, master codes, Lion
+ * momentum, step counters and RNG continuity. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +13,6 @@
 #include "ig/value.h"
 
 #define NUP 20
-static int use_lion;
 
 static uint64_t rs = 12345;
 static uint64_t nx(void)
@@ -31,8 +30,7 @@ static void one_update(ig_MLP *m, uint8_t *win, int ctx)
     ig_Value **logits = ig_mlp_forward(m, win);
     ig_Value *loss = ig_mlp_loss(m, logits, win[ctx]);
     ig_backward(loss);
-    if (use_lion) ig_mlp_lion_update(m, 1e-3f);
-    else ig_mlp_adam_update(m, 5e-3f);
+    ig_mlp_lion_update(m, 1e-3f);
     free(logits);
     ig_reset();
 }
@@ -43,7 +41,7 @@ static void train_range(ig_MLP *m, int ctx, long from, long to, uint8_t *win,
 {
     for (long s = from; s < to; s++) one_update(m, win, ctx);
     if (save_at) {
-        if (ig_mlp_save2(m, save_at, to, 0xC0FFEE) != 0) exit(1);
+        if (ig_mlp_save(m, save_at, to, 0xC0FFEE) != 0) exit(1);
     }
 }
 
@@ -55,22 +53,22 @@ static int run_case(int w2)
     long mid = NUP / 2;
 
     /* straight: NUP updates in one process */
-    ig_mlp_adam_reset();
+    ig_mlp_opt_reset();
     ig_MLP *a = ig_mlp_new(ctx, nh, 7);
     train_range(a, ctx, 0, NUP, win, "/tmp/ig_test_ckpt_straight.bin");
 
     /* split: mid updates, save, resume, remaining */
     rs = 12345; /* reset our test rng so both paths see identical inputs */
-    ig_mlp_adam_reset();
+    ig_mlp_opt_reset();
     ig_MLP *b = ig_mlp_new(ctx, nh, 7);
     train_range(b, ctx, 0, mid, win, ck);
     ig_mlp_free(b);
 
     long steps_done = -1;
     uint64_t rng_back = 0;
-    ig_MLP *c = ig_mlp_load2(ck, &steps_done, &rng_back);
+    ig_MLP *c = ig_mlp_load(ck, &steps_done, &rng_back);
     if (!c) { fprintf(stderr, "load failed\n"); return 1; }
-    if (steps_done != mid) {
+    if (steps_done != mid || rng_back != 0xC0FFEE) {
         fprintf(stderr, "FAIL: steps_done=%ld expected %ld\n", steps_done, mid);
         return 1;
     }
@@ -98,8 +96,8 @@ static int run_case(int w2)
                 diffs, checked);
         return 1;
     }
-    printf("checkpoint: resume is bit-exact over %ld params (w2=%d lion=%d)\n",
-           checked, w2, use_lion);
+    printf("checkpoint: resume is bit-exact over %ld params (w2=%d)\n",
+           checked, w2);
     unlink(ck);
     unlink("/tmp/ig_test_ckpt_straight.bin");
     ig_mlp_free(a);
@@ -109,14 +107,10 @@ static int run_case(int w2)
 
 int main(void)
 {
-    ig_w2 = 0;
+    ig_w2 = 0; /* one-byte storage + SR: the SR RNG must resume too */
     if (run_case(0)) return 1;
     rs = 12345;
     ig_w2 = 1;
     if (run_case(1)) return 1;
-    rs = 12345;
-    use_lion = 1; /* Lion momentum (16-bit grid) must resume bit-exactly */
-    if (run_case(1)) return 1;
-    ig_w2 = 0;
     return 0;
 }

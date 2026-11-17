@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-11-17) by [plan/001](../../plan/001-reset-byte-transformer.md).**
+> Kept for provenance. The tool-use/agent scope (D2, D3, M4, M6–M8), Adam,
+> and the scalar-engine-as-trainer approach are dropped; D6/D7/D8 numerics
+> carry over. Code paths named here may no longer exist.
+
 # intgrad — Project Plan
 
 A deep-learning framework in plain C, in the spirit of Karpathy's

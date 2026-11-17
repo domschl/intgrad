@@ -1,7 +1,17 @@
-/* Byte-level MLP proof-of-concept: predicts next UTF-8 byte from the last
- * CTX bytes (concatenated one-hot inputs). This is the M2 milestone vehicle:
- * it exercises the autograd + log-quant path end-to-end before the
- * transformer arrives in M3.
+/* Byte-level MLP reference vehicle: predicts the next UTF-8 byte from the
+ * last CTX bytes (concatenated one-hot inputs), built on the scalar
+ * autograd in value.h.
+ *
+ * Role since plan/001: the NUMERICAL ORACLE for the log-byte scheme
+ * (bit-exact, slow, easy to audit). Scalable models live in the PyTorch
+ * reference (plan/001 M2+); every quantizer there must match this code.
+ *
+ * Numerics (plan/001 §2, decisions D6/D7/D8 carried over):
+ *   - forward/backward compute with 1-byte log-grid weights/activations,
+ *     fixed-point byte logits, exact accumulation + one requant per output;
+ *   - parameters are stored as a 16-bit master log code (two-byte, default)
+ *     or as 1 byte with stochastic rounding (ig_w2 = 0);
+ *   - optimizer: Lion, one momentum on a 16-bit log grid.
  */
 #ifndef IG_NET_H
 #define IG_NET_H
@@ -9,108 +19,74 @@
 #include "ig/value.h"
 
 #define IG_VOCAB 256
+#define IG_NGROUPS 4 /* W1, b1, W2, b2 */
 
 typedef struct {
     int ctx, nh;
-    int nh2;                /* optional second hidden layer width (E6), 0=off */
     ig_Value **W1; /* [ctx * IG_VOCAB * nh] */
     ig_Value **b1; /* [nh] */
-    ig_Value **W2; /* [src * IG_VOCAB], src = nh2 ? nh2 : nh */
+    ig_Value **W2; /* [nh * IG_VOCAB] */
     ig_Value **b2; /* [IG_VOCAB] */
-    ig_Value **W2b;/* [nh * nh2] (only when nh2 > 0) */
-    ig_Value **b2b;/* [nh2] */
-    /* Group index handed to the linear-grid scales (E-E1): W1=0, b1=1,
-     * W2=2, b2=3, W2b=4, b2b=5. Kept on the model so the forward pass can
-     * quantize a master weight without searching the group table. */
-    int gbase[6];
 } ig_MLP;
 
 ig_MLP *ig_mlp_new(int ctx, int nh, unsigned seed);
-ig_MLP *ig_mlp_new2(int ctx, int nh, int nh2, unsigned seed);
 void    ig_mlp_free(ig_MLP *m);
+long    ig_mlp_nparams(const ig_MLP *m);
+
+/* Parameter groups in canonical order (W1, b1, W2, b2): fills lists/ns,
+ * returns IG_NGROUPS. Used by the optimizer, stats and checkpoints. */
+int ig_mlp_groups(const ig_MLP *m, ig_Value **lists[IG_NGROUPS],
+                  long ns[IG_NGROUPS]);
 
 /* Forward on ctx bytes, returns malloc'd logits[IG_VOCAB] (graph nodes). */
 ig_Value **ig_mlp_forward(ig_MLP *m, const uint8_t *in);
-
-/* loss = CE(logits, target) built into the graph. */
+/* loss = CE(logits, target), computed exactly over quantized logits. */
 ig_Value *ig_mlp_loss(ig_MLP *m, ig_Value **logits, uint8_t target);
-extern int ig_loss_fp;    /* diagnostic: CE from stored values, no requant */
-extern int ig_fp_logits;  /* diagnostic: float from the logits onward */
-extern int ig_fp_params;  /* diagnostic: params stored float (no grid) */
-
-/* Weight-update numerics (E7). ig_sr: stochastic rounding of 1-byte
- * parameter storage (ig_w2 == 0; default 1; 0 = round-to-nearest, which
- * discards ~98% of Adam updates on the byte grid). ig_gscale_dynamic: in pure-int mode, each
- * tensor's gradients use a per-step power-of-two absmax scale (default 1;
- * 0 = the fixed global ig_get_gscale()). */
-extern int ig_sr;
-extern int ig_gscale_dynamic;
-/* Two-byte weights (E8; DEFAULT 1 per decision D7): each parameter keeps a
- * 16-bit master log code (ig_Value.wq); forward/backward read only its
- * high byte. ig_w2_sr (default 0) stochastically rounds the low byte;
- * by default the update path is deterministic (round-to-nearest on the
- * 16-bit grid — E8: as good as SR). ig_sr applies to 1-byte mode only. */
-extern int ig_w2;
-extern int ig_w2_sr;
-
-/* Counters since the last reset, over nonzero parameter steps (quant mode
- * only): n steps, how many were below half the local grid spacing
- * ("subgrid": lost under round-to-nearest, SR-dependent otherwise), and
- * how many actually changed the stored value. */
-void ig_mlp_update_stats(long *n, long *subgrid, long *moved, int reset);
 
 void ig_mlp_zero_grad(ig_MLP *m);
-void ig_mlp_sgd_update(ig_MLP *m, float lr); /* update + byte round-trip */
 void ig_mlp_scale_grads(ig_MLP *m, float s); /* for batch-mean loss */
 
-/* Adam (M2). Biases-corrected; single-MLP-per-process state (documented
- * limitation until the tensor path). Honors ig_pure_int (gradient byte
- * round-trip) and ig_quant_enabled (param grid round-trip). */
-void ig_mlp_adam_update(ig_MLP *m, float lr);
-void ig_mlp_adam_reset(void); /* resets ALL optimizer state (Adam + Lion) */
+/* Parameter storage (quantized mode only):
+ *   ig_w2 = 1 (default): two-byte weights — 16-bit master log code
+ *           (ig_Value.wq), forward reads its high byte; ig_w2_sr adds
+ *           stochastic rounding of the low byte (default off: RTN).
+ *   ig_w2 = 0: one-byte weights; ig_sr = 1 (default) stochastic rounding,
+ *           ig_sr = 0 round-to-nearest (known-broken; kept only so the
+ *           regression test keeps its teeth). */
+extern int ig_w2;
+extern int ig_w2_sr;
+extern int ig_sr;
 
-/* Lion (E9): one momentum tensor, update lr*sign(.) — see net.c. Same
- * conventions as Adam (ig_pure_int, ig_wd, two-byte weights). */
+/* Lion (Chen et al. 2023): c = b1*m + (1-b1)*g; w -= lr*(sign(c) + wd*w);
+ * m = b2*m + (1-b2)*g; b1 0.9, b2 0.99. Momentum lives on a 16-bit log
+ * grid with a per-tensor pow2 absmax scale (float when quant is off). */
+extern float ig_wd; /* decoupled weight decay, default 0.1 */
 void ig_mlp_lion_update(ig_MLP *m, float lr);
-#define IG_OPTQ_F32  0  /* float state (oracle) */
-#define IG_OPTQ_B2   1  /* 16-bit log codes, RTN, per-tensor pow2 absmax scale */
-#define IG_OPTQ_B1   2  /* 1-byte log codes, RTN (ablation: freezes) */
-#define IG_OPTQ_B1SR 3  /* 1-byte log codes, stochastic rounding */
-extern int ig_lion_m;   /* -1 = auto: B2 when quantized, F32 otherwise */
-int ig_lion_m_mode(void);
-/* Optimizer state currently held (e.g. after ig_mlp_load2): bit 0 = Adam
- * moments, bit 1 = Lion momentum. */
-int ig_mlp_opt_state(void);
-extern float ig_wd;     /* decoupled weight decay, default 0 */
+void ig_mlp_opt_reset(void);
 
-/* Checkpoints: 'IGCK' + dims + scales + (fp32 value, byte code) per param
- * + Adam moments + run-progress state (steps done, RNG position) so a
- * resumed run continues the LR schedule and data order bit-exactly (v3).
- * steps_out/rng_out receive the stored progress (0 if absent). */
-int     ig_mlp_save2(const ig_MLP *m, const char *path, long steps_done,
-                    uint64_t rng); /* atomic: writes <path>.tmp then rename */
-ig_MLP *ig_mlp_load2(const char *path, long *steps_out, uint64_t *rng_out);
-#define ig_mlp_save(m, p) ig_mlp_save2((m), (p), 0, 0)
-#define ig_mlp_load(p)    ig_mlp_load2((p), NULL, NULL)
+/* Counters since the last reset over nonzero parameter steps (quant mode):
+ * n steps, "subgrid" (below half the local grid step: lost under RTN),
+ * and how many actually changed the stored code. */
+void ig_mlp_update_stats(long *n, long *subgrid, long *moved, int reset);
 
-/* Gradient-flow analysis (D1 instrumentation). Prints one line per param
- * group: n, mean|g|, max|g|, zero-collapse fraction (gradients that
- * quantize to 0 at the current gscale) and saturation fraction. */
+/* Gradient-flow statistics for pure-int mode (M5.5-style gate metrics). */
 typedef struct {
     long n;
     double mean_abs;
     float max_abs;
-    float zero_frac;    /* nonzero g collapsed to 0 by quantization */
-    float true_zero_frac; /* structurally-zero gradients (never touched) */
-    float sat_frac;     /* g clamps at the grid edge */
-    /* M5.5 gate metrics (magnitude-weighted): share of the tensor's
-     * gradient L1 mass destroyed by quantization. Count fractions above
-     * stay as diagnostics: collapsing many negligible softmax-tail
-     * gradients is harmless, losing a little mass is not. */
-    float collapse_mass; /* sum|g| of collapsed entries / sum|g| */
-    float sat_mass;      /* sum(|g| - max_repr) over clamped / sum|g| */
+    float zero_frac;      /* nonzero g collapsed to 0 by quantization */
+    float true_zero_frac; /* structurally-zero gradients */
+    float sat_frac;       /* g clamped at the grid edge */
+    float collapse_mass;  /* L1 mass share lost to collapse */
+    float sat_mass;       /* L1 mass share lost to saturation */
 } ig_GradStat;
+ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group);
 
-ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group); /* group 0..3 = W1,b1,W2,b2 */
+/* Checkpoint (format v8): dims, scale, per param (fp32 value, 16-bit
+ * master code), Lion momentum, steps done, data RNG, SR RNG. Atomic save
+ * (tmp + rename); resume is bit-exact (ctest checkpoint). */
+int     ig_mlp_save(const ig_MLP *m, const char *path, long steps_done,
+                    uint64_t rng);
+ig_MLP *ig_mlp_load(const char *path, long *steps_out, uint64_t *rng_out);
 
 #endif /* IG_NET_H */
