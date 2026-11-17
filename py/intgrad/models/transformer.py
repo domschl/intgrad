@@ -138,8 +138,7 @@ class QSite(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.hist.copy_(torch.cat([self.hist[1:], cur.view(1)]))
-                lim = float(Q.DEC8[Q.MAX_CODE]) / s
-                self.clamp.copy_((x.detach().abs() > lim).float().mean())
+                self.clamp.copy_((x.detach().abs() * s > Q.TOP8).float().mean())
         return Q._QActT.apply(x, s)
 
 

@@ -37,6 +37,7 @@ def _V(t: np.ndarray) -> np.ndarray:
 
 DEC8 = _V(256.0 * np.arange(MAX_CODE + 1, dtype=np.float64))
 THR8 = np.concatenate([[0.0], _V(256.0 * np.arange(1, MAX_CODE + 1) - 128.0)]).astype(np.float32)
+TOP8 = float(DEC8[MAX_CODE])          # top of the byte grid (6653.0), as a Python float
 DEC16 = _V(np.arange(MAX_M + 1, dtype=np.float64))
 THR16 = np.concatenate([[0.0], _V(np.arange(1, MAX_M + 1) - 0.5)]).astype(np.float32)
 
@@ -211,6 +212,17 @@ class _QFx(torch.autograd.Function):
         return g * keep, None
 
 
+def _maxrel_consts(step) -> tuple[float, float]:
+    """(step, lowest representable d) as float32 values in Python floats.
+    Computed outside traced code: torch.compile turns numpy scalars into
+    tensors, and float() of a tensor breaks the graph."""
+    st = np.float32(step)
+    return float(st), float(np.float32(-255.0) * st)
+
+
+MAXREL_DEFAULT = _maxrel_consts(FXSTEP)
+
+
 class _QFxMaxRel(torch.autograd.Function):
     """Max-relative fixed-point logits: d = x - max(x) <= 0 is stored as an
     unsigned byte on the grid step * {0..255}, i.e. [-25.5, 0] at step 0.1.
@@ -219,11 +231,10 @@ class _QFxMaxRel(torch.autograd.Function):
     carries no gradient."""
 
     @staticmethod
-    def forward(ctx, x, step):
-        st = np.float32(step)
+    def forward(ctx, x, consts):
+        st, lo = consts
         m = x.amax(-1, keepdim=True)
         d = x - m
-        lo = float(np.float32(-255.0) * st)
         ctx.save_for_backward(d >= lo)
         stt = _f32(st, x.device)
         q = (d / stt).clamp(-255.0, 0.0)               # unsigned byte: 0 … 255 steps
@@ -243,8 +254,7 @@ class _QActT(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, s):
-        lim = _f32(DEC8[MAX_CODE], x.device) / s
-        ctx.save_for_backward(x.abs() <= lim)
+        ctx.save_for_backward(x.abs() * s <= TOP8)
         return rt8_fast(x, s)
 
     @staticmethod
@@ -260,8 +270,8 @@ def act_fixed(x: torch.Tensor, scale: float) -> torch.Tensor:
     return _QActT.apply(x, _f32(scale, x.device))
 
 
-def logit_maxrel(x: torch.Tensor, step=FXSTEP) -> torch.Tensor:
-    return _QFxMaxRel.apply(x, step)
+def logit_maxrel(x: torch.Tensor, step=None) -> torch.Tensor:
+    return _QFxMaxRel.apply(x, MAXREL_DEFAULT if step is None else _maxrel_consts(step))
 
 
 def logit_fx(x: torch.Tensor, step=FXSTEP) -> torch.Tensor:

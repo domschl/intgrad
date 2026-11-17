@@ -763,6 +763,42 @@ Verdict (001-D12): no gain decay, no conv anchor (both stay available,
 default off). Attention scores and logits use the max-relative unsigned
 byte in M4.
 
+**X13 — M4 phase A: cumulative quantization stages at S (2026-11-17).**
+S preset, 4000 steps, q/k/v conv 3, Lion (0.95, 0.98), lr 3e-3, wd 3,
+seeds 42 and 7. The fp twin is X12 a-base (1.7349 / 1.7390).
+Activation sites use the delayed pow2 scale (16-forward amax history,
+×2 headroom).
+
+| stage (cumulative) | s42 | s7 | Δ vs fp |
+|---|---|---|---|
+| a weights (16-bit master, byte forward) | 1.7558 | 1.7429 | +0.012 |
+| b1 + activations (residual stream fp) | 1.7503 | 1.7634 | +0.020 |
+| b2 + residual stream on the byte grid | 1.7508 | 1.7533 | +0.015 |
+| c + max-relative scores and logits | 1.7505 | 1.7558 | +0.016 |
+| d + attention probabilities (byte grid, scale 4096) | 1.7554 | 1.7489 | +0.015 |
+| e + pure-int gradients | 1.7573 | 1.7566 | +0.020 |
+
+Findings:
+- **Full byte numerics cost ≈ 0.015–0.020 bpb at S**, a fifth of the
+  0.10 gate. Almost all of it comes with the weights (stage a); later
+  stages are within seed noise, which is larger quantized (0.013 between
+  seeds at stage a).
+- **Range is not a problem on the log grid.** At the frozen delayed
+  scales (32 val chunks, `runs/m4a_range.py`), no site clamps.
+  Underflow is 0.09% overall, worst 0.4–0.7% (ReLU² output, final
+  norm), and those values sit ~17 octaves below each site's max.
+- **Throughput.** The phase-A runs were 3× slower than fp because the
+  activation sites broke torch.compile graphs: `float()` of numpy
+  scalars traced as tensors, plus data-dependent limits. With that
+  fixed, there are 0 graph breaks and full quantization costs 1.55× fp
+  per step at S. At M, micro-batch 16 runs at 310 ms/step and peaks at
+  8.7 GiB. The numerics are unchanged, so the results stand.
+
+Consequence for 001-D10 (learned scales): with no clamps and negligible
+underflow, a learned scale has nothing to trade on the log grid, as
+§5 M4 expected. Where a learned scale does trade range against
+resolution is the linear int8 grid, which phase C re-tests.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
