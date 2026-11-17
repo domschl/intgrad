@@ -8,6 +8,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# -ffp-contract=off: no implicit FMA contraction, so a*b + c rounds twice
+# exactly like PyTorch's elementwise ops (bit-exact parity, plan/001 §4.2).
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffp-contract=off")
 set(CMAKE_C_FLAGS_DEBUG "-O0 -g -fsanitize=address,undefined")
 set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native")
 
@@ -21,6 +24,14 @@ add_library(intgrad
 target_include_directories(intgrad PUBLIC include)
 target_link_libraries(intgrad PUBLIC m)
 target_compile_options(intgrad PRIVATE -Wall -Wextra -Wshadow)
+set_target_properties(intgrad PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Shared build of the same sources: the C oracle as seen by the Python
+# parity tests (py/tests/test_parity.py loads build/libintgrad_ref.so).
+add_library(intgrad_ref SHARED
+  src/logquant.c src/value.c src/net.c src/data.c src/dataset.c)
+target_include_directories(intgrad_ref PUBLIC include)
+target_link_libraries(intgrad_ref PUBLIC m)
 
 add_executable(ig-train src/train.c)
 target_link_libraries(ig-train PRIVATE intgrad)

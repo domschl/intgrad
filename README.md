@@ -21,9 +21,8 @@ Plans are numbered, and later ones build on earlier ones.
 
 The C library is the **numerical oracle**: a micrograd-style scalar
 autograd with the exact quantization semantics, a byte-MLP trainer
-(`ig-train`), and regression tests. The scalable transformer is built in
-a PyTorch reference engine (plan/001 M2–M3), bound to the oracle by parity
-tests.
+(`build/ig-train`), and regression tests. Training happens in the PyTorch
+engine in `py/` (GPU), which is bound to the oracle by parity tests.
 
 ```sh
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -42,9 +41,13 @@ and the eval set (and, from plan/001 M2, the PyTorch reference engine):
 
 ```sh
 cd py && uv sync --extra corpus
-uv run pytest                                    # unit tests
-uv run python -m intgrad.data --index ../data/split-v1/idx.bin   # batcher throughput
+uv run pytest            # unit + parity (needs build/libintgrad_ref.so) + probes
+cd .. && uv run --project py ig-train configs/x4-mlp.toml --set train.seed=7
+#        run dir: runs/<name>-s<seed>/ (config, meta, metrics.jsonl, ckpt.pt)
 ```
+
+The PyTorch quantizers and Lion are **bit-identical** to the C oracle (the
+grids are defined by shared float32 tables; see plan/001 §2 and §4.2).
 
 `--steps` is the total horizon. `--save`/`--load` resume bit-exactly
 (parameters, master codes, Lion momentum, data and SR RNG); pass the same

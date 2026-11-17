@@ -89,6 +89,16 @@ one checkpoint format, `data/` and `runs/` never committed, fixtures in
 
 ## 2. Numerics specification (the contract both engines implement)
 
+**Canonical form (M2):** every grid is defined by float32 tables computed
+once in double, `V(t) = float32(exp2(t·0.1/256) − 1)` with t in 1/256 grid
+steps (byte values `V(256c)`, byte thresholds `V(256k − 128)`, 16-bit
+values `V(M)`, thresholds `V(k − ½)`). A code is the number of thresholds ≤
+|x|·scale, so no transcendental function runs at encode time. Scales are
+powers of two (exact), and per-tensor scales are chosen with `frexp`
+(exact). C is compiled with `-ffp-contract=off`, so no hidden FMAs. This
+makes C and PyTorch bit-identical on CPU and GPU, and it is also the form
+an integer kernel would use (threshold table).
+
 | Tensor | Grid | Bytes | Notes |
 |---|---|---|---|
 | weights (compute view) | symlog Δ=0.1, scale 256 (max ≈ 25.6) | 1 | high byte of the master code |
@@ -117,12 +127,13 @@ py/                   uv project `intgrad` (M1: corpus pipeline + data; M2: engi
   intgrad/eval_set.py   eval-v1 freeze, baselines (unigram, KN-5, xz, zstd)
   intgrad/quant.py      grids, STE, w16 master weights   (parity with C)
   intgrad/lion.py       Lion with 16-bit momentum         (parity with C)
-  intgrad/models/       mlp.py (parity vehicle), transformer.py
-  intgrad/train.py      single entry point, config-file driven
-  intgrad/eval.py       frozen-eval bpb, per-source, probes
-  tests/                pytest (unit + parity against C golden files)
-configs/              (M3) one TOML per experiment
-runs/                 gitignored: <date>-<name>/{config, git hash, log, ckpt, samples}
+  intgrad/models/       mlp.py (parity vehicle), transformer.py (M3)
+  intgrad/train.py      single entry point `ig-train`, TOML config + --set overrides
+  intgrad/evaluate.py   eval-v1 bpb per source
+  intgrad/probes.py     capability probes (P1 …)
+  tests/                pytest: unit, parity (ctypes vs build/libintgrad_ref.so), probes
+configs/              one TOML per experiment
+runs/                 gitignored: <name>-s<seed>/{config.toml, meta.json, metrics.jsonl, ckpt.pt}
 data/                 gitignored, PRIVATE
 ```
 
@@ -143,11 +154,16 @@ value, sampler length-weighting, batcher continuity (§5 M1), checkpoint
 bit-exact resume.
 
 ### 4.2 Layer 2 — parity, C oracle ⇄ PyTorch (`pytest`, < 1 min)
-A small C tool (`ig-golden`, M2) writes golden vectors: encode/decode over
-a dense float sweep, w16 updates, Lion steps on fixed inputs, one MLP
-forward/backward on fixed weights. PyTorch must reproduce **codes
-exactly** and floats within 1 ulp-class tolerance. This turns the C engine
-into the reference for every quantizer the transformer uses.
+`py/tests/test_parity.py` calls the C oracle directly through ctypes
+(`build/libintgrad_ref.so` + `ig/flat.h`), on CPU and CUDA. Bit-exact:
+the tables, codes over a sweep of every threshold ±3 ulp at four scales
+plus random magnitudes, SR, 16-bit encode/decode, the high-byte view, the
+fixed-point grid, `pow2_scale`, and one full Lion step in six modes
+(float, w2, w2-SR, w1-SR, w1-RTN, pure-int) including master codes and
+momentum. MLP forward logits are also bit-exact; loss and gradients agree
+to float tolerance (C `expf`/`logf` vs torch's). Mutation-checked: the
+"natural" float constant 0.1 for (1 − 0.9f), half-to-even rounding in
+the fixed-point grid, and a log2-based encoder each make these tests fail.
 
 ### 4.3 Layer 3 — capability probes (deterministic, minutes on GPU)
 Each probe has a pass threshold and runs in fp *and* quantized mode:
@@ -234,7 +250,16 @@ continues the exact same byte stream, (d) random-mode byte histogram
 matches the length weighting (χ² test) and (e) throughput ≥ 100 MB/s from
 page cache.
 
-### M2 — PyTorch reference engine + parity
+### M2 — PyTorch reference engine + parity ✅
+Done 2026-11-17: 59 pytest (parity, unit, probes P1 in 4 modes, resume)
+and 5 ctest green; X4 shows the gap reproduced across engines; P5 3.44 bpb
+after 33 s. Deviations from the items below: parity runs through ctypes
+against the C library instead of golden files (stronger: arbitrary
+inputs), and master codes live in Lion's state (`state["wq"]`) instead of
+a `W16Param` class (fewer moving parts). The C quantizer was made
+table-canonical (§2) so that bit-exact parity is possible. Finding X5:
+saturation is absorbing under the clamp-masked STE.
+
 1. `py/` uv project (`torch` CUDA wheel for the RTX 4070 Ti, `numpy`,
    `pytest`). Run through `uv run`.
 2. `quant.py`: symlog encode/decode, fake-quant with clamp-aware STE
@@ -377,6 +402,39 @@ adopted (split-v1).
 (the n-gram train sample was 4 MB, not 100 MB, because the loop compared
 bytes with a window count) was fixed before recording. An assert guards
 it now.
+
+**X4 — MLP vehicle, C oracle vs PyTorch (M2 acceptance, 2026-11-17).**
+Q: does the PyTorch engine reproduce the oracle's training behaviour, not
+just single steps? Decision: whether PyTorch can replace C for training.
+Protocol: ctx 4, hidden 96, batch 32, Lion lr 2e-3 wd 0.1, warmup 200,
+cosine, 4000 steps (128 k windows), seeds 42 and 7, fp and quantized (w2).
+Each engine uses its own sampler stream from split-v1. All models are
+scored by the same evaluator on eval-v1 val (C checkpoints loaded into the
+bit-exact PyTorch forward). `configs/x4-mlp.toml`; raw results in
+`runs/x4/summary.json`.
+
+| engine | fp (s42 / s7) | quant w2 (s42 / s7) | gap q − fp (mean) | time/run |
+|---|---|---|---|---|
+| C oracle | 3.454 / 3.462 | 3.441 / 3.428 | −0.023 | 300 s (CPU) |
+| PyTorch | 3.457 / 3.487 | 3.437 / 3.448 | −0.029 | 33 s (GPU) |
+
+SE per number ≈ 0.02 (chunk level). Verdict: gaps agree within 0.006
+(bound ±0.03), and absolute values agree within seed spread. **PyTorch
+replaces C for all training from here on.** Both engines show quantized
+≤ fp at this scale; with 2 seeds this is not a claim, only a note for M4.
+
+**X5 — Saturation is absorbing (P1 probe, 2026-11-17).** Memorizing
+`overfit.txt` (ctx 8, hidden 128, 1500 full-batch steps): fp reaches the
+floor H(next | ctx) = 0.0324 nats at lr 1e-2, but every quantized mode
+stalls (w2 0.18, w1-SR 0.14, pure-int 0.21; 0.43 after 6000 steps). At
+lr 1e-2, 99.99% of logit accumulators clamp at ±12.7 (max 14.8 k) and 29%
+of hidden pre-activations clamp at 25.6. Windows whose logits all pinned
+to the same edge score ln 256. The clamp-masked STE gives clamped values
+zero gradient, so nothing pulls them back. At lr ≤ 3e-3 all quantized
+modes reach the floor exactly. Consequence for M4: watch clamp rates per
+tensor class; levers are lr, a weak restoring gradient through the clamp
+("leaky" STE), and range control (logit scale, normalization). The probe
+runs at lr 3e-3.
 
 ## 9. Risks
 

@@ -1,0 +1,15 @@
+# X4: MLP vehicle, C-oracle protocol (plan/001 M2 acceptance).
+# Quantized default; fp twin with --set quant.enabled=false
+name = "x4-mlp"
+
+[model]
+kind = "mlp"
+ctx = 4
+hidden = 96
+
+[train]
+steps = 4000
+batch = 32
+lr = 2e-3
+wd = 0.1
+warmup = 200

@@ -8,61 +8,116 @@ static float g_fxstep = 0.1f;
 void ig_set_scale(float scale) { g_scale = scale; }
 float ig_get_scale(void) { return g_scale; }
 
-/* ---- generic symlog byte grid ---- */
+/* ---- canonical tables ---------------------------------------------- */
 
-uint8_t ig_encode2(float x, float delta, float scale)
+static float DEC8[IG_MAX_CODE + 1], THR8[IG_MAX_CODE + 1];
+static float DEC16[IG_W16_MAXM + 1], THR16[IG_W16_MAXM + 1];
+static int g_init;
+
+static float V(double t) { return (float)(exp2(t * 0.1 / 256.0) - 1.0); }
+
+static void init(void)
 {
+    if (g_init) return;
+    for (int c = 0; c <= IG_MAX_CODE; c++) DEC8[c] = V(256.0 * c);
+    THR8[0] = 0.0f;
+    for (int k = 1; k <= IG_MAX_CODE; k++) THR8[k] = V(256.0 * k - 128.0);
+    for (int m = 0; m <= IG_W16_MAXM; m++) DEC16[m] = V((double)m);
+    THR16[0] = 0.0f;
+    for (int k = 1; k <= IG_W16_MAXM; k++) THR16[k] = V((double)k - 0.5);
+    g_init = 1;
+}
+
+const float *ig_lq_table(int which, int *n)
+{
+    init();
+    switch (which) {
+    case 0: *n = IG_MAX_CODE + 1; return DEC8;
+    case 1: *n = IG_MAX_CODE + 1; return THR8;
+    case 2: *n = IG_W16_MAXM + 1; return DEC16;
+    case 3: *n = IG_W16_MAXM + 1; return THR16;
+    default: *n = 0; return 0;
+    }
+}
+
+/* number of k in 1..n with t[k] <= a  (t[1..n] ascending) */
+static int count_le(const float *t, int n, float a)
+{
+    int lo = 0, hi = n; /* answer in [lo, hi] */
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (t[mid] <= a) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+
+/* ---- byte grid ------------------------------------------------------- */
+
+uint8_t ig_encode_s(float x, float scale)
+{
+    init();
     if (!(x > 0.0f) && !(x < 0.0f)) return 0; /* 0 or NaN -> zero */
-    float a = fabsf(x) * scale;
-    int q = (int)lroundf(log2f(1.0f + a) / delta);
-    if (q < 1) return 0; /* faithful: tiny values are 0, never inflated to code 1 */
-    if (q > IG_MAX_CODE) q = IG_MAX_CODE;
+    int q = count_le(THR8, IG_MAX_CODE, fabsf(x) * scale);
+    if (q == 0) return 0;
     return (uint8_t)(x < 0.0f ? 128 + q : q);
 }
 
-static float dec2(uint8_t c, float delta, float scale)
+float ig_decode_s(uint8_t c, float scale)
 {
-    if ((c & 0x7Fu) == 0) return 0.0f; /* zero + reserved code 128 */
-    float m = (exp2f((float)(c & 0x7Fu) * delta) - 1.0f) / scale;
+    init();
+    float m = DEC8[c & 0x7Fu] / scale;
     return (c & 0x80u) ? -m : m;
 }
 
-float ig_rt2(float x, float delta, float scale)
+float ig_roundtrip_s(float x, float scale) { return ig_decode_s(ig_encode_s(x, scale), scale); }
+
+/* SR between the neighbouring grid values DEC[lo] <= a < DEC[lo+1]. */
+static float sr_pick(const float *dec, int maxc, float a, float u)
 {
-    return dec2(ig_encode2(x, delta, scale), delta, scale);
+    int lo = count_le(dec, maxc, a); /* largest c with dec[c] <= a (dec[0]=0) */
+    if (lo >= maxc) return dec[maxc];
+    float vlo = dec[lo], vhi = dec[lo + 1];
+    float p = (a - vlo) / (vhi - vlo);
+    return u < p ? vhi : vlo;
 }
 
-float ig_rt2_sr(float x, float delta, float scale, float u)
+float ig_roundtrip_sr_s(float x, float scale, float u)
 {
+    init();
     if (!(x > 0.0f) && !(x < 0.0f)) return 0.0f;
-    float a = fabsf(x) * scale, r;
-    int lo = (int)floorf(log2f(1.0f + a) / delta);
-    if (lo >= IG_MAX_CODE) {
-        r = exp2f((float)IG_MAX_CODE * delta) - 1.0f; /* clamp */
-    } else {
-        if (lo < 0) lo = 0;
-        float vlo = exp2f((float)lo * delta) - 1.0f;
-        float vhi = exp2f((float)(lo + 1) * delta) - 1.0f;
-        r = u < (a - vlo) / (vhi - vlo) ? vhi : vlo; /* linear in value: unbiased */
-    }
-    r /= scale;
+    float r = sr_pick(DEC8, IG_MAX_CODE, fabsf(x) * scale, u) / scale;
     return x < 0.0f ? -r : r;
 }
 
-float ig_max_abs(float delta, float scale)
+float ig_max_abs(float scale)
 {
-    return (exp2f((float)IG_MAX_CODE * delta) - 1.0f) / scale;
+    init();
+    return DEC8[IG_MAX_CODE] / scale;
 }
-
-uint8_t ig_encode_s(float x, float scale) { return ig_encode2(x, IG_DELTA, scale); }
-float ig_decode_s(uint8_t code, float scale) { return dec2(code, IG_DELTA, scale); }
 
 uint8_t ig_encode(float x) { return ig_encode_s(x, g_scale); }
 float ig_decode(uint8_t code) { return ig_decode_s(code, g_scale); }
-float ig_roundtrip(float x) { return ig_rt2(x, IG_DELTA, g_scale); }
-float ig_roundtrip_sr(float x, float u) { return ig_rt2_sr(x, IG_DELTA, g_scale, u); }
+float ig_roundtrip(float x) { return ig_roundtrip_s(x, g_scale); }
+float ig_roundtrip_sr(float x, float u) { return ig_roundtrip_sr_s(x, g_scale, u); }
 
-/* ---- fixed-point byte grid ---- */
+float ig_pow2_scale(float mx)
+{
+    init();
+    if (!(mx > 0.0f)) return 1.0f;
+    float r = DEC8[IG_MAX_CODE] / mx;
+    int e;
+    if (isinf(r)) e = 126;
+    else {
+        frexpf(r, &e); /* r = f * 2^e, f in [0.5, 1) -> floor(log2 r) = e - 1 */
+        e -= 1;
+    }
+    if (e > 126) e = 126;
+    if (e < -126) e = -126;
+    return ldexpf(1.0f, e);
+}
+
+/* ---- fixed-point byte grid ------------------------------------------ */
 
 void ig_set_fxstep(float step) { g_fxstep = step; }
 float ig_get_fxstep(void) { return g_fxstep; }
@@ -75,45 +130,43 @@ float ig_fx_roundtrip(float x)
     return (float)lroundf(q) * g_fxstep;
 }
 
-/* ---- 16-bit symlog grid ---- */
+/* ---- 16-bit grid ------------------------------------------------------ */
 
-#define W16_SUB 256
-#define W16_MAXM (IG_MAX_CODE * W16_SUB)
-
-int16_t ig_enc16(float x, float u, float delta, float scale)
+int16_t ig_enc16(float x, float u, float scale)
 {
+    init();
     if (!(x > 0.0f) && !(x < 0.0f)) return 0;
     float a = fabsf(x) * scale;
-    float d16 = delta / (float)W16_SUB;
-    float qf = log2f(1.0f + a) / d16;
     int M;
     if (u < 0.0f) {
-        M = (int)lroundf(qf);
+        M = count_le(THR16, IG_W16_MAXM, a);
     } else {
-        int lo = (int)floorf(qf);
-        if (lo < 0) lo = 0;
-        float vlo = exp2f((float)lo * d16) - 1.0f;
-        float vhi = exp2f((float)(lo + 1) * d16) - 1.0f;
-        M = u < (a - vlo) / (vhi - vlo) ? lo + 1 : lo;
+        int lo = count_le(DEC16, IG_W16_MAXM, a);
+        if (lo >= IG_W16_MAXM) M = IG_W16_MAXM;
+        else {
+            float vlo = DEC16[lo], vhi = DEC16[lo + 1];
+            M = u < (a - vlo) / (vhi - vlo) ? lo + 1 : lo;
+        }
     }
-    if (M > W16_MAXM) M = W16_MAXM;
     return (int16_t)(x < 0.0f ? -M : M);
 }
 
-float ig_dec16(int16_t wq, float delta, float scale)
+float ig_dec16(int16_t wq, float scale)
 {
+    init();
     int M = wq < 0 ? -wq : wq;
-    float m = (exp2f((float)M * delta / (float)W16_SUB) - 1.0f) / scale;
+    float m = DEC16[M] / scale;
     return wq < 0 ? -m : m;
 }
 
-int16_t ig_w16_encode(float x, float u) { return ig_enc16(x, u, IG_DELTA, g_scale); }
-float ig_w16_full(int16_t wq) { return ig_dec16(wq, IG_DELTA, g_scale); }
+int16_t ig_w16_encode(float x, float u) { return ig_enc16(x, u, g_scale); }
+float ig_w16_full(int16_t wq) { return ig_dec16(wq, g_scale); }
 
 float ig_w16_fwd(int16_t wq)
 {
+    init();
     int M = wq < 0 ? -wq : wq;
-    int hi = (M + W16_SUB / 2) / W16_SUB; /* integer: (M + 128) >> 8 */
-    float m = (exp2f((float)hi * IG_DELTA) - 1.0f) / g_scale;
+    int hi = (M + IG_W16_SUB / 2) / IG_W16_SUB; /* integer: (M + 128) >> 8 */
+    float m = DEC8[hi] / g_scale;
     return wq < 0 ? -m : m;
 }

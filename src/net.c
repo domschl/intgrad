@@ -197,11 +197,7 @@ static void store_param(ig_Value *p, float step)
 
 /* Per-tensor power-of-two absmax scale: the largest pow2 that keeps
  * max|x| inside the log grid. Saturation is impossible by construction. */
-static float absmax_scale(float mx)
-{
-    if (!(mx > 0.0f)) return 1.0f;
-    return exp2f(floorf(log2f(ig_max_abs(IG_DELTA, 1.0f) / mx)));
-}
+static float absmax_scale(float mx) { return ig_pow2_scale(mx); }
 
 static float group_gscale(ig_Value *const *ps, long n)
 {
@@ -227,7 +223,7 @@ ig_GradStat ig_mlp_grad_stats(const ig_MLP *m, int group)
     ig_Value **ps = l[group];
     long n = ns[group];
     float gs = group_gscale(ps, n);
-    float gmax = ig_max_abs(IG_DELTA, gs);
+    float gmax = ig_max_abs(gs);
     long ztrue = 0, zq = 0, sat = 0;
     double zmass = 0.0, smass = 0.0;
     s.n = n;
@@ -311,7 +307,7 @@ void ig_mlp_lion_update(ig_MLP *m, float lr)
         float s = absmax_scale(mx);
         for (long i = 0; i < ns[g]; i++)
             lion_m[k + i] = ig_quant_enabled
-                ? ig_dec16(ig_enc16(lion_tmp[i], -1.0f, IG_DELTA, s), IG_DELTA, s)
+                ? ig_dec16(ig_enc16(lion_tmp[i], -1.0f, s), s)
                 : lion_tmp[i];
         k += ns[g];
     }
@@ -404,4 +400,81 @@ fail:
     ig_mlp_free(m);
     fclose(f);
     return NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/* Flat access for parity tests (ig/flat.h)                            */
+/* ------------------------------------------------------------------ */
+
+#include "ig/flat.h"
+
+void ig_mlp_export(const ig_MLP *m, float *data, int16_t *wq, float *grad)
+{
+    ig_Value **l[IG_NGROUPS];
+    long ns[IG_NGROUPS], k = 0;
+    for (int g = 0; g < ig_mlp_groups(m, l, ns); g++)
+        for (long i = 0; i < ns[g]; i++, k++) {
+            if (data) data[k] = l[g][i]->data;
+            if (wq) wq[k] = l[g][i]->wq;
+            if (grad) grad[k] = l[g][i]->grad;
+        }
+}
+
+void ig_mlp_import(ig_MLP *m, const float *data, const int16_t *wq,
+                   const float *grad)
+{
+    ig_Value **l[IG_NGROUPS];
+    long ns[IG_NGROUPS], k = 0;
+    for (int g = 0; g < ig_mlp_groups(m, l, ns); g++)
+        for (long i = 0; i < ns[g]; i++, k++) {
+            if (data) l[g][i]->data = data[k];
+            if (wq) l[g][i]->wq = wq[k];
+            if (grad) l[g][i]->grad = grad[k];
+        }
+}
+
+long ig_lion_get_state(float *out)
+{
+    if (lion_m && out) memcpy(out, lion_m, sizeof(float) * (size_t)lion_n);
+    return lion_m ? lion_n : 0;
+}
+
+void ig_lion_set_state(const float *mom, long n)
+{
+    ig_mlp_opt_reset();
+    if (n <= 0) return;
+    lion_ensure(n, 0);
+    memcpy(lion_m, mom, sizeof(float) * (size_t)n);
+}
+
+uint64_t ig_sr_get_state(void) { return sr_state; }
+void ig_sr_set_state(uint64_t s) { sr_state = s; }
+
+double ig_mlp_window_backward(ig_MLP *m, const uint8_t *window)
+{
+    ig_Value **logits = ig_mlp_forward(m, window);
+    ig_Value *loss = ig_mlp_loss(m, logits, window[m->ctx]);
+    ig_backward(loss);
+    double l = loss->data;
+    free(logits);
+    ig_reset();
+    return l;
+}
+
+void ig_mlp_logits(ig_MLP *m, const uint8_t *in, float *out)
+{
+    ig_Value **logits = ig_mlp_forward(m, in);
+    for (int k = 0; k < IG_VOCAB; k++) out[k] = logits[k]->data;
+    free(logits);
+    ig_reset();
+}
+
+void ig_set_modes(int quant, int pure_int, int w2, int w2_sr, int sr, float wd)
+{
+    ig_quant_enabled = quant;
+    ig_pure_int = pure_int;
+    ig_w2 = w2;
+    ig_w2_sr = w2_sr;
+    ig_sr = sr;
+    ig_wd = wd;
 }

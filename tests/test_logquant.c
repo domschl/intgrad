@@ -17,7 +17,8 @@ int main(void)
     /* round-trip relative error across the useful range */
     /* Away from zero the grid is multiplicative (~7.2% step -> <6% error).
      * Near zero symlog spacing becomes absolute: (2^DELTA - 1)/SCALE. */
-    float abs_grid = (exp2f(IG_DELTA) - 1.0f) / ig_get_scale();
+    int nt;
+    float abs_grid = ig_lq_table(0, &nt)[1] / ig_get_scale();
     float vals[] = { 0.001f, 0.01f, 0.1f, 0.5f, 1.0f, 3.0f, 10.0f, 20.0f,
                      -0.001f, -0.3f, -2.0f, -15.0f };
     for (size_t i = 0; i < sizeof vals / sizeof *vals; i++) {

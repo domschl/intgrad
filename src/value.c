@@ -60,7 +60,7 @@ static float qz(float x)
 static int grid_clamped(float x, int fx)
 {
     if (fx) return fabsf(x) > 127.0f * ig_get_fxstep();
-    return fabsf(x) > ig_max_abs(IG_DELTA, ig_get_scale());
+    return fabsf(x) > ig_max_abs(ig_get_scale());
 }
 
 static int qz_clamped(float x)

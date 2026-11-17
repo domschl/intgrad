@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
     "numpy>=2.0",
+    "torch>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -15,6 +16,7 @@ corpus = ["lxml>=5.0", "zstandard>=0.23"]
 ig-build-shards = "intgrad.corpus.build_shards:main"
 ig-make-split = "intgrad.corpus.make_split:main"
 ig-eval-freeze = "intgrad.eval_set:main"
+ig-train = "intgrad.train:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
