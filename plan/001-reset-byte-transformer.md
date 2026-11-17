@@ -357,8 +357,8 @@ one global window (clamp ±26.0, underflow < 1.4e-4). Before (a) below,
 introduce per-tensor power-of-two scales where the telemetry demands it:
 weights per tensor (per output channel if their rows differ by octaves),
 activations by delayed absmax (amax history over recent steps, ~1 octave
-of headroom, so a kernel needs no extra pass), and a per-class
-fixed-point step for attention scores and logits. Decide explicitly how
+of headroom, so a kernel needs no extra pass), and max-relative
+unsigned bytes for attention scores and logits (001-D12, X12). Decide explicitly how
 the residual stream is stored (byte grid with its own scale, or wider).
 Master weights re-encode when their scale changes (rare). Power-of-two
 scales are within the parity-verified contract (§4.2 tests 2⁻¹⁰ … 2²⁰).
@@ -390,8 +390,8 @@ re-encoding on every scale change (alternative to test then: master
 codes at a fixed canonical scale, learned scale on the forward view only).
 
 Turn on §2 numerics layer by layer, each step with its fp twin:
-(a) weights w2, (b) + activations, (c) + logits/attention scores on the
-fx grid, (d) + softmax probabilities, (e) + pure-int gradients. Then the
+(a) weights w2, (b) + activations, (c) + logits/attention scores max-relative
+(001-D12), (d) + softmax probabilities, (e) + pure-int gradients. Then the
 ablations that were open or invalid: w1-SR vs w2 storage; log vs
 *properly implemented* linear-int8 weight grid (re-run of B1).
 
@@ -454,6 +454,12 @@ Deliverables: metric implemented, baseline numbers recorded,
   z-loss, an optional soft-cap, range telemetry and an early lr × wd
   sweep. There is no AdamW diagnostic twin in M3; that idea is revisited
   only if we get stuck or data points at a shortcoming of Lion.
+- **001-D12 Softmax inputs are stored max-relative (X12).** Attention
+  scores and logits are stored as row max − value in an unsigned byte
+  ([−25.5, 0] at step 0.1); only entries with p < 1e-11 clamp. Gains
+  and q/k/v conv kernels stay without decay: bounding them costs bpb.
+  The decay anchor (`train.norm_wd`, `train.conv_decay init`) remains as
+  an option.
 
 ## 7. Pinned artifacts
 
@@ -686,6 +692,53 @@ Verdict: at the longer horizon the optimum widens toward weaker decay (wd
 1 ≈ 3; 10 is now too strong). Bounding magnitudes via a low lr instead
 is clearly worse. We keep wd 3: as good as 1, with a tighter weight bound
 (0.33 vs 1.0) for M4.
+
+**X12 — Logit overflow and growing gains (user request, 2026-11-17).**
+Question: at L, logits clamp on the fixed-point grid (all of it on the
+negative side), and attention scores clamp because the QK-norm gains
+grow without decay (up to ~10). Candidate fixes: decay gains toward 1
+(Lion decay anchored at the initial value, `train.norm_wd`), decay the
+q/k/v conv kernels toward identity instead of 0 (`train.conv_decay
+init`), and logit QAT on the current grid (`fx`) vs max-relative
+(`maxrel`: logit − row max stored as an unsigned byte, [−25.5, 0] at
+step 0.1). S, 4000 steps, q/k/v conv 3, seeds 42 and 7 (seed spread
+≈ 0.004 bpb). Clamp rates are fx-grid rates, worst layer, from the last
+telemetry:
+
+| variant | bpb (mean) | Δ | score clamp | logit clamp | max gain | conv id-tap |
+|---|---|---|---|---|---|---|
+| a base | 1.7370 | — | 18.0% | 58.9% | 5.24 | 0.056 |
+| b gains → 1, wd 3 | 1.7618 | +0.025 | 0.0% | 33.1% | 1.33 | 0.068 |
+| c gains → 1, wd 1 | 1.7483 | +0.011 | 0.2% | 40.3% | 1.99 | 0.061 |
+| d = b + conv → identity | 1.7539 | +0.017 | 0.0% | 34.0% | 1.33 | 0.881 |
+| e = c + conv → identity | 1.7532 | +0.016 | 0.0% | 41.7% | 1.99 | 0.881 |
+| f logit QAT, fx grid | 1.7391 | +0.002 | 21.0% | 54.9% | 5.40 | 0.056 |
+| g logit QAT, max-relative | 1.7397 | +0.003 | 17.9% | 58.2% | 5.29 | 0.056 |
+
+Findings:
+- **Gain decay works mechanically but costs 0.011–0.025 bpb.** Sharp
+  attention is used, not an accident: gains grow because the model
+  needs scores spanning more than ±12.7. Conv decay toward identity
+  keeps the identity tap (0.88 vs 0.06) but does not pay for itself.
+- **Logit QAT is neutral at S** for both grids (within seed noise).
+- **Max-relative storage also fits attention scores**, since softmax is
+  shift-invariant like CE. Post-hoc on the base checkpoints
+  (`Tap.rel`, 64 val chunks), the fraction of entries more than 25.5
+  below their row max is:
+
+  | | scores (worst layer) | logits |
+  |---|---|---|
+  | seed 42 | 18.0% | 17.0% |
+  | seed 7 | 6.3% | 16.7% |
+
+  Those entries carry probability < e^−25.5 ≈ 8e-12, so dropping them
+  loses no mass. The fx-grid "clamp" counted mostly them (fx 22% vs
+  rel 18% in the worst layer). The remaining fx-only clamps are real
+  range loss at the top of the row, which max-relative removes.
+
+Verdict (001-D12): no gain decay, no conv anchor (both stay available,
+default off). Attention scores and logits use the max-relative unsigned
+byte in M4.
 
 ## 9. Risks
 

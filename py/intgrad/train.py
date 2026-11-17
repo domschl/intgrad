@@ -41,6 +41,7 @@ DEFAULTS = {
               "telemetry_every": 0, "samples": 0, "sample_len": 1024,
               "compile": False, "final_eval": True, "betas": [0.9, 0.99],
               "micro_batch": 0,  # >0: gradient accumulation over micro-batches
+              "norm_wd": 0.0, "conv_decay": "zero",
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
 }
@@ -72,7 +73,7 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
             raise ValueError("quantized transformer arrives in M4: set quant.enabled = false")
         from intgrad.models import transformer
         kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
-                                "stem", "stem_dim", "qkv_conv") if k in m}
+                                "stem", "stem_dim", "qkv_conv", "logit_quant") if k in m}
         return transformer.build(m.get("preset"), **kw)
     raise ValueError(f"unknown model kind {m['kind']!r}")
 
@@ -81,13 +82,31 @@ def context_len(cfg: dict, model) -> int:
     return model.ctx if cfg["model"]["kind"] == "mlp" else model.T
 
 
-def param_groups(model, wd: float) -> list[dict]:
-    """Weight decay on matrices (incl. embeddings), none on gains/biases."""
-    mats = [p for p in model.parameters() if p.ndim >= 2]
-    vecs = [p for p in model.parameters() if p.ndim < 2]
+def param_groups(model, wd: float, norm_wd: float = 0.0, conv_decay: str = "zero") -> list[dict]:
+    """Weight decay groups.
+    matrices (2-D, incl. embeddings): wd toward 0 (Lion bound |w| <= 1/wd);
+    gains/biases (1-D): no decay by default, or norm_wd toward their init
+        value (gains -> 1; Lion bound |g - 1| <= 1/norm_wd);
+    conv kernels (3-D): conv_decay "zero" (decay toward 0 with the matrices,
+        the M3 default), "init" (toward their identity init) or "none"."""
     if cfg_is_mlp(model):                      # C-oracle parity: wd everywhere
         return [{"params": list(model.parameters()), "wd": wd}]
-    return [{"params": mats, "wd": wd}, {"params": vecs, "wd": 0.0}]
+    mats = [p for p in model.parameters() if p.ndim == 2]
+    vecs = [p for p in model.parameters() if p.ndim < 2]
+    convs = [p for p in model.parameters() if p.ndim >= 3]
+    groups = [{"params": mats, "wd": wd}]
+    groups.append({"params": vecs, "wd": norm_wd, "anchor": "init"} if norm_wd
+                  else {"params": vecs, "wd": 0.0})
+    if convs:
+        if conv_decay == "zero":
+            groups[0]["params"] = mats + convs
+        elif conv_decay == "init":
+            groups.append({"params": convs, "wd": wd, "anchor": "init"})
+        elif conv_decay == "none":
+            groups.append({"params": convs, "wd": 0.0})
+        else:
+            raise ValueError(f"conv_decay {conv_decay!r}")
+    return groups
 
 
 def cfg_is_mlp(model) -> bool:
@@ -163,7 +182,8 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     qc = QuantConfig(**q)
     model = build_model(cfg, qc, gen).to(dev)
     sr_gen = torch.Generator(device=dev).manual_seed(t["seed"] + 1)
-    opt = Lion(param_groups(model, t["wd"]), lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen,
+    opt = Lion(param_groups(model, t["wd"], t["norm_wd"], t["conv_decay"]),
+               lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen,
                betas=tuple(t["betas"]))
     ix = data.Index(idx_path)
     ctx = context_len(cfg, model)

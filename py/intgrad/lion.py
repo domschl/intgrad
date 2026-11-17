@@ -34,7 +34,9 @@ class Lion(torch.optim.Optimizer):
                  generator: torch.Generator | None = None,
                  betas: tuple[float, float] = (0.9, 0.99)):
         """betas default to the C oracle's (bit-exact parity only holds
-        for the defaults)."""
+        for the defaults). A param group may set "anchor": "init" to decay
+        toward the parameter's initial value instead of 0 (gains toward 1,
+        identity-initialized convs toward identity): w -= lr*wd*(w - w0)."""
         super().__init__(params, dict(lr=lr, wd=wd))
         b1, b2 = np.float32(betas[0]), np.float32(betas[1])
         self.b = (b1, np.float32(1.0) - b1, b2, np.float32(1.0) - b2)
@@ -45,6 +47,8 @@ class Lion(torch.optim.Optimizer):
             for p in group["params"]:
                 st = self.state[p]
                 st["m"] = torch.zeros_like(p, dtype=torch.float32)
+                if group.get("anchor") == "init":
+                    st["anchor"] = p.detach().clone()
                 if self.qc.enabled and self.qc.w2:
                     st["wq"] = Q.enc16(p.detach(), self.qc.scale)
 
@@ -69,7 +73,8 @@ class Lion(torch.optim.Optimizer):
                 b1, omb1, b2, omb2 = self.b
                 c = Q._f32(b1, dev) * mo + Q._f32(omb1, dev) * g
                 u = torch.sign(c)
-                step = lr * (u + wd * p)
+                w_dec = p - st["anchor"] if "anchor" in st else p
+                step = lr * (u + wd * w_dec)
                 if not qc.enabled:
                     p.sub_(step)
                 elif qc.w2:

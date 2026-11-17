@@ -194,6 +194,40 @@ class _QFx(torch.autograd.Function):
         return g * keep, None
 
 
+class _QFxMaxRel(torch.autograd.Function):
+    """Max-relative fixed-point logits: d = x - max(x) <= 0 is stored as an
+    unsigned byte on the grid step * {0..255}, i.e. [-25.5, 0] at step 0.1.
+    STE: gradient 1 where d is in range, 0 where it clamped (more than 25.5
+    below the top logit, p < 1e-11). CE is shift-invariant, so the max
+    carries no gradient."""
+
+    @staticmethod
+    def forward(ctx, x, step):
+        st = np.float32(step)
+        m = x.amax(-1, keepdim=True)
+        d = x - m
+        lo = float(np.float32(-255.0) * st)
+        ctx.save_for_backward(d >= lo)
+        stt = _f32(st, x.device)
+        q = (d / stt).clamp(-255.0, 0.0)               # unsigned byte: 0 … 255 steps
+        t = torch.trunc(q)
+        r = t - ((q - t) <= -0.5).to(q.dtype)          # round half away (q <= 0)
+        return m + r * stt
+
+    @staticmethod
+    def backward(ctx, g):
+        (keep,) = ctx.saved_tensors
+        return g * keep, None
+
+
+def logit_maxrel(x: torch.Tensor, step=FXSTEP) -> torch.Tensor:
+    return _QFxMaxRel.apply(x, step)
+
+
+def logit_fx(x: torch.Tensor, step=FXSTEP) -> torch.Tensor:
+    return _QFx.apply(x, np.float32(step))
+
+
 @dataclass
 class QuantConfig:
     """Numerics switches (plan/001 §2). enabled=False is the float oracle."""

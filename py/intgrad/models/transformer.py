@@ -57,6 +57,18 @@ class Tap:
             "underflow": 0.0 if fx else ((a > 0) & (a < BYTE_MIN)).float().mean().item(),
         }
 
+    @torch.no_grad()
+    def rel(self, name: str, x: torch.Tensor, valid: torch.Tensor | None = None) -> None:
+        """Max-relative range (softmax inputs): fraction of valid entries more
+        than 25.5 (an unsigned byte at step 0.1) below their row max."""
+        x = x.detach().float()
+        if valid is not None:
+            x = x.masked_fill(~valid, float("-inf"))
+        d = x.amax(-1, keepdim=True) - x
+        ok = torch.isfinite(d)
+        self.stats.setdefault(name, {})["relclamp"] = (
+            (d[ok] > float(Q.FXSTEP * 255)).float().mean().item())
+
 
 def rope_cache(T: int, dh: int, device, base: float = 10000.0):
     inv = 1.0 / (base ** (torch.arange(0, dh, 2, device=device).float() / dh))
@@ -147,6 +159,7 @@ class Block(nn.Module):
             s = (q[:1] @ k[:1].transpose(-1, -2)) / math.sqrt(self.dh)
             mask = torch.ones(T, T, dtype=torch.bool, device=x.device).tril()
             tap(f"scores{i}", s[..., mask])
+            tap.rel(f"scores{i}", s, mask)
             tap(f"attn_out{i}", a)
         x = x + self.o(a)
         h = self.n2(x)
@@ -165,7 +178,8 @@ class Block(nn.Module):
 class ByteTransformer(nn.Module):
     def __init__(self, d: int, L: int, H: int, T: int, zloss: float = 1e-4,
                  softcap: float = 0.0, qk_norm: bool = True,
-                 stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0):
+                 stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0,
+                 logit_quant: str = "none"):
         """stem "embed": tied 256 x d embedding / output head (baseline).
         stem "conv": 256 x stem_dim embedding -> causal conv stem_dim -> d
         (kernel 4) -> + causal depthwise conv (kernel 4, dilation 2) on
@@ -174,6 +188,9 @@ class ByteTransformer(nn.Module):
         super().__init__()
         self.d, self.L, self.H, self.T = d, L, H, T
         self.zloss, self.softcap, self.stem = zloss, softcap, stem
+        if logit_quant not in ("none", "fx", "maxrel"):
+            raise ValueError(f"logit_quant {logit_quant!r}")
+        self.logit_quant = logit_quant      # logits-only QAT (X12)
         if stem == "embed":
             self.emb = nn.Embedding(256, d)
             nn.init.normal_(self.emb.weight, std=0.02)
@@ -234,8 +251,13 @@ class ByteTransformer(nn.Module):
         logits = F.linear(self.nf(h), self.head_weight()).float()
         if self.softcap > 0:
             logits = self.softcap * torch.tanh(logits / self.softcap)
+        if self.logit_quant == "fx":
+            logits = Q.logit_fx(logits)
+        elif self.logit_quant == "maxrel":
+            logits = Q.logit_maxrel(logits)
         if tap is not None:
             tap("logits", logits)
+            tap.rel("logits", logits)
             for name, p in self.named_parameters():
                 tap(f"w.{name}", p)
         return logits

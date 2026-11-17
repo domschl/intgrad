@@ -56,3 +56,17 @@ def test_micro_batches_give_the_same_gradient():
         (m.loss(m(x[i:i + 2]), y[i:i + 2])[0] * 0.25).backward()
     for a, p in zip(full, m.parameters()):
         assert torch.allclose(a, p.grad, atol=1e-6)
+
+
+def test_lion_anchor_decays_toward_init():
+    from intgrad.lion import Lion
+    from intgrad.quant import QuantConfig
+    g = torch.nn.Parameter(torch.ones(4) * 3.0)
+    opt = Lion([{"params": [g], "wd": 1.0, "anchor": "init"}], lr=0.01, wd=1.0,
+               qc=QuantConfig(enabled=False))
+    with torch.no_grad():
+        g.copy_(torch.tensor([3.0, 5.0, -1.0, 3.0]))        # moved away from init 3
+    for _ in range(2000):
+        g.grad = torch.zeros(4)
+        opt.step()
+    assert torch.allclose(g.detach(), torch.full((4,), 3.0), atol=1e-3)

@@ -55,3 +55,12 @@ def test_pow2_scale_fits_absmax():
         s = Q.pow2_scale(torch.tensor(mx, dtype=torch.float32)).item()
         assert np.log2(s) == int(np.log2(s))
         assert mx * s <= Q.DEC8[127] < 2 * mx * s
+
+
+def test_maxrel_logits_grid_and_gradient():
+    x = torch.tensor([[2.0, 1.94, -10.0, -30.0]], requires_grad=True)
+    y = Q.logit_maxrel(x)
+    d = (y - 2.0).detach()
+    assert torch.allclose(d, torch.tensor([[0.0, -0.1, -12.0, -25.5]]), atol=1e-5)
+    y.sum().backward()
+    assert x.grad.tolist() == [[1.0, 1.0, 1.0, 0.0]]       # only the clamped one is cut
