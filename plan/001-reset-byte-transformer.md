@@ -325,6 +325,32 @@ the residual stream is stored (byte grid with its own scale, or wider).
 Master weights re-encode when their scale changes (rare). Power-of-two
 scales are within the parity-verified contract (§4.2 tests 2⁻¹⁰ … 2²⁰).
 
+**Learned scales (001-D10).** Compare, for activations, attention
+scores and logits:
+- (a) delayed-absmax pow2 scales (above);
+- (b) **learned log₂ scales** rounded to a power of two in the forward pass
+  (TQT, Jain et al. 2020), initialized from (a). The scale gets gradient
+  LSQ-style (Esser et al. 2020): clamped elements push it up, underflowing
+  and linear-region elements push it down. This gives clamped values a
+  path back, which the clamp-masked STE alone does not (X5/X6). It is
+  trained by Lion in its own param group (own lr, no wd).
+
+Oscillation at power-of-two boundaries is handled three ways:
+- (b1) Lion's own momentum only;
+- (b2) an EMA of the latent log₂ s, rounded for the forward pass
+  (momentum on the value);
+- (b3) hysteresis.
+
+Expectation to test: on the symlog grid an octave is exactly 10 codes, so
+a factor-2 flip leaves in-range grid points in place and only moves the
+clamp/underflow edges (and the near-zero linear region). Flips should
+then be cheap, unlike on linear int8 grids, and (b1) may suffice.
+Metrics: bpb vs the fp twin, clamp/underflow rates over time, and **scale
+flips per 1k steps** per tensor. Weight scales stay statistics-based
+unless (b) clearly wins, because their 2-byte master codes would need
+re-encoding on every scale change (alternative to test then: master
+codes at a fixed canonical scale, learned scale on the forward view only).
+
 Turn on §2 numerics layer by layer, each step with its fp twin:
 (a) weights w2, (b) + activations, (c) + logits/attention scores on the
 fx grid, (d) + softmax probabilities, (e) + pure-int gradients. Then the
@@ -376,6 +402,10 @@ Deliverables: metric implemented, baseline numbers recorded,
   reserved bytes for now.
 - **001-D8 Eval protocol**: eval-v1 (§4.4) is the only number that goes
   into result tables. Test is evaluated only at plan close.
+- **001-D10 Learned quantization scales are an M4 experiment (user
+  decision).** TQT/LSQ-style learned pow2 scales vs delayed absmax, with
+  oscillation handled by Lion momentum, latent EMA or hysteresis
+  (§5 M4). Measured, not assumed.
 - **001-D9 Lion stays; magnitudes are controlled by design (user
   decision after X6).** The right lr works, and M3 builds in QK-norm,
   z-loss, an optional soft-cap, range telemetry and an early lr × wd
