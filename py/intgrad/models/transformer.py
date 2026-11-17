@@ -351,13 +351,18 @@ class ByteTransformer(nn.Module):
         return ce, ce
 
     @torch.no_grad()
-    def chunk_bits(self, chunks: torch.Tensor, batch: int = 64) -> torch.Tensor:
+    def chunk_bits(self, chunks: torch.Tensor, batch: int = 0) -> torch.Tensor:
         """Bits for chunks[:, 1:] (eval-v1 protocol). Sliding windows with
         stride T/2: each target is scored once, in the earliest window that
         contains it, so it sees between T/2 and T bytes of context (all of
         its in-chunk context if it is within the first window)."""
         N, Lc = chunks.shape
         T, stride = self.T, self.T // 2
+        if not batch:                       # explicit attention: <= 2^27 scores per tensor
+            batch = 64
+            if self.qat.explicit_attn:
+                while batch > 1 and batch * self.H * T * T > 1 << 27:
+                    batch //= 2
         n_in = Lc - 1                                       # inputs 0..L-2
         if n_in <= T:
             starts = [0]
