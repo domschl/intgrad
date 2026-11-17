@@ -52,13 +52,15 @@ re-confirm each one on the transformer (M4).** None of them is a law yet.
 | B1 | **E-E1/E10 linear-grid mode cut the gradient graph**: `ig_value(wview(...))` made each weight a fresh leaf, so W1/W2 never learned and only the biases trained | All `lin*` results (≈4.70 bpb ≈ unigram) are invalid, so the "linear int8 costs 1.7 bpb" conclusion is wrong | code removed; question re-opened in M4 |
 | B2 | **Train sampling was uniform per document**: books are 61% of train bytes but 0.67% of documents, so a byte in a book was ~700× less likely to be seen than a byte in a wiki definition | Model trained mostly on short wiki leads | **fixed**: length-weighted sampling (`ig_ds_sample_doc`, ctest `dataset`) |
 | B3 | **Eval took one window from each of the first N val docs in index order**, which is in practice only corpus-v0 wiki definitions | "val bpb" measured wiki-defs only, at ≤800 windows (noisy) | **fixed** for now (length-weighted, seeded); proper frozen eval set in M1 |
-| B4 | `idx.bin` stores **absolute shard paths** | Index breaks if the repo moves | M1 (index v2: relative paths + source id) |
-| B5 | Documents are joined by `"\n \n"` in shards, but the model **never sees a document boundary** (windows stay inside one doc) | Needed for sequential streaming / recurrence | M1 (EOD byte, D7 below) |
+| B4 | `idx.bin` stores **absolute shard paths** | Index breaks if the repo moves | **fixed (M1)**: index v2, relative paths + source id |
+| B5 | Documents are joined by `"\n \n"` in shards, but the model **never sees a document boundary** (windows stay inside one doc) | Needed for sequential streaming / recurrence | **fixed (M1)**: batchers insert EOD `0x03` |
 | B6 | Scalar autograd: ~440 windows/s on a 120k-param MLP | A transformer cannot be trained on it | D2: PyTorch reference engine |
 | B7 | Experiment harness: single seeds, no frozen eval set, fp-oracle runs not paired, flags added per experiment and never removed (≈30 flags) | Conclusions flipped three times (E1–E6 invalidated by E7, E10 by B1, all numbers by B2/B3) | rules in §4.5 |
 | B8 | Untracked-but-committed files under `data/` (synthetic traces), fixtures in `data/` | Violates the "data/ is private" rule | **fixed**: `data/` fully ignored, fixtures in `tests/fixtures/` |
 | B9 | Checkpoint format accreted v1–v7 compat branches + Adam moments | Complexity | **fixed**: single format v8 |
-| B10 | Possible near-duplicate leakage between corpus-v0 wiki-2017 definitions and corpus-v1 wiki-2015 articles (split is by exact content hash) | Optimistic val bpb on wiki | spot check: 0/40 val-snippet hits in v0 (no exact leakage). Near-dup check in M1 (low priority) |
+| B11 | **Gutenberg books duplicated**: 27 k of 50 k book ids exist as 2–4 encoding variants (`N`, `N-8`, `N-0`), and exact-hash dedup removed only 362 docs; variants also straddled the split | Books double/triple weighted, val leakage | **fixed (M1, X1)**: variant selection + near-dup fingerprints |
+| B12 | **Gutenberg boilerplate** in 95% of book docs (license headers in old formats, "End of Project Gutenberg's …" lines unmatched, credits, transcriber notes) | Training on license text | **fixed (M1, X1)**: `intgrad.corpus.gutenberg` |
+| B10 | Possible near-duplicate leakage between corpus-v0 wiki-2017 definitions and corpus-v1 wiki-2015 articles (split is by exact content hash) | Optimistic val bpb on wiki | **found and fixed (M1, X2)**: 30% of val articles had their lead in a train definition; the split now groups English wiki by title |
 
 ### 1.3 Why the experiments ran in circles
 
@@ -124,11 +126,12 @@ plan/                 numbered plans (this is 001)
 docs/DATA.md          corpus pipeline (no data in git)
 docs/history/         frozen v0 plan + experiment log
 include/ src/ tests/  C oracle: libintgrad, ig-train, ctest
-tools/                build_shards.py, make_split.py (+ M1: index v2, eval freeze)
-py/                   (M2) uv project `intgrad`
+py/                   uv project `intgrad` (M1: corpus pipeline + data; M2: engine)
+  intgrad/corpus/       build_shards, make_split (index v2), gutenberg (cleaner)
+  intgrad/data.py       index v2 reader, random + sequential batchers
+  intgrad/eval_set.py   eval-v1 freeze, baselines (unigram, KN-5, xz, zstd)
   intgrad/quant.py      grids, STE, w16 master weights   (parity with C)
   intgrad/lion.py       Lion with 16-bit momentum         (parity with C)
-  intgrad/data.py       idx reader, random + sequential batchers
   intgrad/models/       mlp.py (parity vehicle), transformer.py
   intgrad/train.py      single entry point, config-file driven
   intgrad/eval.py       frozen-eval bpb, per-source, probes
@@ -208,7 +211,15 @@ attention, so they catch the "trains but doesn't really learn" bug class
 See §1.4. Acceptance: `ctest` green (5 tests), ASan build green, no tracked
 file under `data/`.
 
-### M1 — Data path: index v2, batchers, frozen eval
+### M1 — Data path: index v2, batchers, frozen eval ✅
+Done 2026-11-17. All acceptance checks pass (pytest `test_data.py`,
+throughput random 134 / sequential 245 MB/s). Added along the way:
+Gutenberg cleanup + dedup (B11/B12, X1), corpus-v2, title-grouped split
+(B10, X2). Deviation from item 2: random windows are drawn from the
+bucket's *virtual stream* (docs joined by EOD) instead of within one doc.
+That is still byte-uniform, and documents shorter than the context
+(wiki definitions average ~700 B) are no longer excluded.
+
 1. **Index v2** (`make_split.py`): paths relative to the index file, a
    `u8 source` field per doc (wiki-en / wiki-de / wiki-defs / books /
    other), and docs kept in corpus order (needed for sequential mode).
@@ -329,15 +340,58 @@ Deliverables: metric implemented, baseline numbers recorded,
 
 | Artifact | Value |
 |---|---|
-| split | `data/split-v0` (blake2b content buckets, 1‰ val / 1‰ test), 10.85 M train docs, 56.5 GB |
-| train byte shares (by source size class) | books 60.7%, wiki articles 32.9%, wiki defs 6.4% |
-| eval-v1 hash | *(M1)* |
-| unigram / 5-gram / xz / zstd on eval-v1 | *(M1)* |
+| corpora | `data/corpus-v2` (books cleaned + deduped, wiki-2017 defs, text; 21.5 GB) + `data/corpus-v1-wiki` (18.6 GB) |
+| split | `data/split-v1`, index v2 blake2b `885d7ce042173809b349ba1f5bdd36fa`; 1‰ val / 1‰ test, English wiki grouped by title; 10.81 M train docs, 40.0 GB |
+| train byte shares | books 46.5%, wiki-en 32.5%, wiki-de 14.0%, wiki-defs 6.9%, text 0.1% |
+| eval-v1 | 512 × 2048 B; val blake2b `035bcfa09a4e8bc6930299822f1590a6` (books 261, wiki-en 127, wiki-de 82, wiki-defs 16, text 26 chunks); test `7572ca3a43221abc55301df07c8c8018` |
+
+Baselines on eval-v1 val (bits/byte over positions 1..2047 of each chunk, ± SE over chunks):
+
+| baseline | all | books | wiki-en | wiki-de | wiki-defs |
+|---|---|---|---|---|---|
+| unigram (100 MB train sample) | 4.738 ± 0.014 | 4.585 | 4.806 | 5.078 | 4.894 |
+| **Kneser-Ney 5-gram** (100 MB train sample) | **2.415 ± 0.014** | 2.366 | 2.376 | 2.626 | 2.417 |
+| xz -9e (whole 1 MB set) | 2.897 | | | | |
+| zstd -19 (whole set) | 2.969 | | | | |
+| zstd -19 + 110 KB train dictionary, per chunk | 3.229 | | | | |
+
+The bar for M3 is the KN-5 line: a transformer that doesn't clearly beat
+2.42 bpb has not learned more than local byte statistics.
 
 ## 8. Experiment log (plan 001)
 
 Format: `X<n>` id, question, hypothesis, decision informed, config,
-result (± SE, seeds), verdict. Empty at creation.
+result (± SE, seeds), verdict.
+
+**X1 — Gutenberg cleanup precision/recall (2026-11-17).** Q: can PG
+boilerplate be stripped with high precision without touching the book?
+H: markers + zone-restricted paragraph scoring + a 30% guard suffice.
+Decision: what goes into corpus-v2. Method: 3 × 400 random books after
+variant selection; manual review of every class of removed paragraph, plus
+residual PG-specific mentions. Iterations fixed: weak-signal double
+counting, line-anchored "Produced by" matching prose, a tail note rule
+that ate end-notes, and title paragraphs taken by the sandwich rule.
+Result: no reviewed removal was book text, except one book about digital
+libraries that loses tail paragraphs (accepted). Residual PG text in
+0.25–0.5% of books (was 95%). ≈ 4.5% of book bytes removed; guard fired
+30× in the full build. Near-dup fingerprint: 58/60 variant pairs found,
+0/300 false positives. Verdict: adopted (corpus-v2).
+
+**X2 — Wiki definitions ⇄ articles leakage (B10, 2026-11-17).** Q: does
+the per-document hash split leak wiki leads across buckets? Method: the
+share of held-out docs whose normalized lead (letters 0–48 / 0–24 /
+100–148) matches a train doc of the other wiki source. Result: per-doc
+hashing 30.2% / 22.8% (articles / definitions). Lead-text grouping gave 0%
+by construction, but 14% on letters 100–148 because of first-sentence
+edits. **Title grouping: 0.5% / 0.4% (0–48), 1.2% / 1.7% (0–24).** The
+remaining 100–148 matches are definitions too short for the key plus
+templated stubs; ≤ 0.7% are candidate true leaks. Verdict: title grouping
+adopted (split-v1).
+
+**X3 — eval-v1 baselines (2026-11-17).** See §7. A bug found on the way
+(the n-gram train sample was 4 MB, not 100 MB, because the loop compared
+bytes with a window count) was fixed before recording. An assert guards
+it now.
 
 ## 9. Risks
 

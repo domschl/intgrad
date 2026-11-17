@@ -31,10 +31,19 @@ cmake --build build
 ctest --test-dir build
 
 ./build/ig-train --data tests/fixtures/sample.txt --steps 500 --hidden 64 --sample 200
-./build/ig-train --index data/split-v0/idx.bin --steps 2500 --hidden 96 \
+./build/ig-train --index data/split-v1/idx.bin --steps 2500 --hidden 96 \
     --eval-every 500 --eval-windows 800
 #   --no-quant   exact float oracle      --pure-int  byte-grid gradients
 #   --w1         1-byte weights + SR     --w2-sr     SR on the low weight byte
+```
+
+The Python package in `py/` (uv) holds the corpus pipeline, the batchers
+and the eval set (and, from plan/001 M2, the PyTorch reference engine):
+
+```sh
+cd py && uv sync --extra corpus
+uv run pytest                                    # unit tests
+uv run python -m intgrad.data --index ../data/split-v1/idx.bin   # batcher throughput
 ```
 
 `--steps` is the total horizon. `--save`/`--load` resume bit-exactly
@@ -45,8 +54,7 @@ flags on resume.
 
 `data/` and `runs/` are **never committed** (`.gitignore`, no exceptions).
 Much of the corpus is not openly licensed. The repo contains only the
-pipeline (`tools/build_shards.py`, `tools/make_split.py`; see
-[docs/DATA.md](docs/DATA.md)). Small fixtures written for this repo live in
+pipeline (`py/intgrad/corpus/`; see [docs/DATA.md](docs/DATA.md)). Small fixtures written for this repo live in
 `tests/fixtures/`.
 
 ## Layout
@@ -55,7 +63,8 @@ pipeline (`tools/build_shards.py`, `tools/make_split.py`; see
 plan/           numbered plans (001 = current)
 include/ src/   C oracle: logquant (grids), value (autograd), net (MLP, Lion), dataset
 tests/          ctest: quantizer, autograd, checkpoint resume, training numerics, sampler
-tools/          corpus + split builders (uv, PEP 723)
+py/             uv project `intgrad`: corpus pipeline (Gutenberg cleaner, shards,
+                split/index v2), batchers (random + sequential), eval set + baselines
 docs/           DATA.md; history/ = frozen v0 plan and experiment log
 ```
 

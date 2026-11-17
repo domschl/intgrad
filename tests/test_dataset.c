@@ -2,7 +2,8 @@
  * their length (every byte equally likely), held-out buckets must never
  * leak into train sampling, and min_len must be honored.
  *
- * Builds a synthetic shard + idx.bin (tools/make_split.py layout) in /tmp. */
+ * Builds a synthetic shard + idx.bin (v2, intgrad.corpus.make_split layout)
+ * in /tmp, with the shard path stored RELATIVE to the index directory. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,16 +37,21 @@ int main(void)
     }
     fclose(f);
     f = fopen(index, "wb");
+    const char *rel = strrchr(shard, '/') + 1; /* both files live in /tmp */
     fwrite("IGIX", 1, 4, f);
+    w32(f, 2);
     w32(f, 1);
-    w32(f, 1);
-    w32(f, (uint32_t)strlen(shard));
-    fwrite(shard, 1, strlen(shard), f);
+    w32(f, (uint32_t)strlen(rel));
+    fwrite(rel, 1, strlen(rel), f);
+    w32(f, 2);
+    fputc(5, f); fwrite("books", 1, 5, f);
+    fputc(7, f); fwrite("wiki-en", 1, 7, f);
     for (int i = 0; i < 5; i++) {
         w32(f, 0);
         w32(f, offs[i]);
         w32(f, lens[i]);
         fputc(bucket[i], f);
+        fputc(i % 2, f); /* source */
     }
     fclose(f);
 
@@ -55,6 +61,11 @@ int main(void)
     if (ds->n_train != 4 || ds->n_val != 1 || ds->train_bytes != 1113) {
         fprintf(stderr, "FAIL: counts %zu/%zu bytes %llu\n", ds->n_train,
                 ds->n_val, (unsigned long long)ds->train_bytes);
+        rc = 1;
+    }
+    if (ds->nsources != 2 || strcmp(ds->source_names[1], "wiki-en") != 0
+        || ig_ds_doc_source(ds, 3) != 1 || ig_ds_doc_source(ds, 2) != 0) {
+        fprintf(stderr, "FAIL: source table\n");
         rc = 1;
     }
     long hits[256] = { 0 };

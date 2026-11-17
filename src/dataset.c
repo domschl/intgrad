@@ -9,7 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define DOC_REC 13 /* u32 file, u32 off, u32 len, u8 bucket */
+#define DOC_REC 14 /* u32 file, u32 off, u32 len, u8 bucket, u8 source */
+#define IDX_VERSION 2
 
 static const uint8_t *map_ro(const char *path, size_t *out_len)
 {
@@ -51,8 +52,9 @@ ig_Dataset *ig_ds_load(const char *index_path)
         return NULL;
     }
     uint32_t ver = rd32(idx + 4);
-    if (ver != 1) {
-        fprintf(stderr, "ig-ds: unsupported index version %u\n", ver);
+    if (ver != IDX_VERSION) {
+        fprintf(stderr, "ig-ds: index version %u, need %d (rebuild with ig-make-split)\n",
+                ver, IDX_VERSION);
         munmap((void *)idx, len);
         return NULL;
     }
@@ -61,19 +63,27 @@ ig_Dataset *ig_ds_load(const char *index_path)
     ds->idx = idx;
     ds->idx_len = len;
 
+    /* shard paths are relative to the index file's directory */
+    const char *slash = strrchr(index_path, '/');
+    size_t dirlen = slash ? (size_t)(slash - index_path) + 1 : 0;
     size_t pos = 8;
+    if (pos + 4 > len) goto fail;
     ds->nfiles = (int)rd32(idx + pos);
     pos += 4;
     ds->files = calloc((size_t)ds->nfiles, sizeof(ig_File));
     if (!ds->files) goto fail;
     for (int i = 0; i < ds->nfiles; i++) {
+        if (pos + 4 > len) goto fail;
         uint32_t pl = rd32(idx + pos);
         pos += 4;
         if (pos + pl > len) goto fail;
-        char *p = malloc(pl + 1);
+        int abs = pl > 0 && idx[pos] == '/';
+        size_t pre = abs ? 0 : dirlen;
+        char *p = malloc(pre + pl + 1);
         if (!p) goto fail;
-        memcpy(p, idx + pos, pl);
-        p[pl] = 0;
+        memcpy(p, index_path, pre);
+        memcpy(p + pre, idx + pos, pl);
+        p[pre + pl] = 0;
         pos += pl;
         size_t flen;
         const uint8_t *fm = map_ro(p, &flen);
@@ -81,6 +91,18 @@ ig_Dataset *ig_ds_load(const char *index_path)
         ds->files[i].path = p;
         ds->files[i].map = fm;
         ds->files[i].len = flen;
+    }
+    if (pos + 4 > len) goto fail;
+    ds->nsources = (int)rd32(idx + pos);
+    pos += 4;
+    if (ds->nsources > IG_DS_MAX_SOURCES) goto fail;
+    for (int i = 0; i < ds->nsources; i++) {
+        if (pos + 1 > len || pos + 1 + idx[pos] > len) goto fail;
+        size_t sl = idx[pos];
+        if (sl >= sizeof ds->source_names[i]) sl = sizeof ds->source_names[i] - 1;
+        memcpy(ds->source_names[i], idx + pos + 1, sl);
+        ds->source_names[i][sl] = 0;
+        pos += 1 + (size_t)idx[pos];
     }
     ds->docs_off = pos;
     if (len < pos || (len - pos) % DOC_REC != 0) {
@@ -187,6 +209,12 @@ int ig_ds_sample_doc(const ig_Dataset *ds, int bucket, uint64_t *rng,
             return 0;
     }
     return -1;
+}
+
+int ig_ds_doc_source(const ig_Dataset *ds, size_t doc_index)
+{
+    if (doc_index >= ds->ndocs) return -1;
+    return ds->idx[ds->docs_off + doc_index * DOC_REC + 13];
 }
 
 int ig_ds_train_doc(const ig_Dataset *ds, uint64_t *rng, int min_len,

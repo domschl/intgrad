@@ -9,7 +9,7 @@
  *            [--save P] [--save-every N] [--load P] [--sample N] [--seed N]
  *            [--no-quant] [--pure-int] [--grad-stats] [--w1] [--w2-sr]
  *
- *   --index      idx.bin from tools/make_split.py (train/val/test buckets)
+ *   --index      idx.bin v2 from ig-make-split (py/intgrad/corpus)
  *   --data       raw file, random windows (smoke mode)
  *   --no-quant   exact float oracle
  *   --pure-int   gradients quantized to the log-byte grid (per-tensor pow2)

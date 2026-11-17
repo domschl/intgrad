@@ -1,48 +1,46 @@
-# /// script
-# requires-python = ">=3.11"
-# dependencies = ["lxml>=4.9"]
-# ///
-"""build_shards.py — dataset builder: raw text sources -> intgrad byte shards.
+"""build_shards — dataset builder: raw text sources -> intgrad byte shards.
 
 Output layout (data/corpus-<name>/):
   shard-0000.bin ...   raw UTF-8 documents, concatenated, separator "\\n \\n"
   manifest.jsonl       one record per shard: {"shard": name, "bytes": n,
-                       "docs": [{"off","len","src"}]}
+                       "docs": [{"off","len","src","kind","lang"}]}
   dataset.json         {"version", "created", "separator", "stats"}
 
 Guarantees for the byte-level trainer:
   * payload contains no C0 control bytes except \\t and \\n (all others are
     stripped, \\r is normalized to \\n) -- keeps the control range free for
-    in-band markers (document boundaries, future special bytes)
+    in-band markers (plan/001 D7: 0x03 end-of-document, 0x00 padding)
   * exact-duplicate documents dropped (blake2b-128)
-  * per-document provenance recorded (source path / kind)
+  * Project Gutenberg: boilerplate stripped, one encoding variant per book
+    id, near-duplicate books dropped (intgrad.corpus.gutenberg)
+  * per-document provenance recorded (source path, kind, language)
 
-Sources (add more adapters as needed):
-  --gutenberg-dir DIR   one book per .txt file            src kind: gutenberg
-  --gutenberg-tree DIR  recursive *.txt (PG mirror), encoding-normalized
-                        + language-detected               src kind: gutenberg
-  --corpus-dir DIR      one doc per .txt file             src kind: textcorpus
-  --wiki-defs FILE      "Title ||| definition" line dump  src kind: wiki2017
-  --wiki-xml LANG=PATH  MediaWiki pages-articles dump     src kind: wikixml
-                        (bz2 auto-detected; repeatable, e.g.
-                        --wiki-xml en=..xml.bak --wiki-xml de=..bz2.bak)
+Sources:
+  --gutenberg-tree DIR  recursive *.txt (PG mirror)        kind: gutenberg
+  --corpus-dir DIR      one doc per .txt file              kind: textcorpus
+  --wiki-defs FILE      "Title ||| definition" line dump   kind: wiki2017
+  --wiki-xml LANG=PATH  MediaWiki pages-articles dump      kind: wikixml
+                        (bz2 auto-detected; repeatable)
   --max-docs N          stop after N accepted docs (sample runs)
+  --jobs N              worker processes for book cleaning (default: all)
 
 Language filter: --langs en,de,fr,es,it,pt,nl (default); "unk" keeps
-unknown-language docs too. Detection = function-word scoring over the first
-4 KB, good enough as a v1 gate for the Latin-family curriculum (D4).
+unknown-language docs too (function-word scoring on body windows).
 
-Run with uv:   uv run tools/build_shards.py --out data/corpus-v0 ...
+Run:  cd py && uv run --extra corpus ig-build-shards --out ../data/corpus-v2 ...
 """
 from __future__ import annotations
 
 import argparse
+import multiprocessing as mp
 import hashlib
 import json
 import re
 import sys
 import time
 from pathlib import Path
+
+from intgrad.corpus import gutenberg as pg
 
 SEP = b"\n \n"
 # Delete every C0 control except \t/\n: the control range stays reserved
@@ -53,59 +51,6 @@ _DELETE = bytes(i for i in range(0x20) if i not in (0x09, 0x0A))
 def sanitize(raw: bytes) -> bytes:
     b = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     return b.translate(None, _DELETE)  # C-speed strip of control bytes
-
-
-PG_STARTS = (b"*** START OF", b"***START OF", b"*** START",
-             b"Start of this Project Gutenberg", b"Start of The Project Gutenberg")
-PG_ENDS = (b"*** END OF", b"***END OF", b"*** END",
-           b"End of this Project Gutenberg", b"End of The Project Gutenberg")
-
-
-# "Produced by ..." credits paragraph: some PG layouts put it AFTER the
-# START marker, so it survives the header cut. Matches exactly ONE
-# paragraph (lines up to the first blank line; non-greedy, so body text
-# is never swallowed). Requires LF-only input (CRLF normalized first).
-_CREDITS = re.compile(
-    rb"^(?:Produced|Prepared|Illustrated|Transcribed) by\b(?:[^\n]*\n)+?\n",
-    re.I)
-
-
-def strip_gutenberg_wrapper(raw: bytes) -> bytes:
-    """Cut Project Gutenberg boilerplate header/footer when present."""
-    raw = raw.replace(b"\r\n", b"\n")  # uniform lines for marker + credits logic
-    window = raw[:8192]
-    lo = -1
-    for marker in PG_STARTS:
-        i = window.rfind(marker)
-        if i >= 0:
-            lo = max(lo, i)
-    if lo >= 0:
-        eol = raw.find(b"\n", lo)
-        if eol > 0:
-            raw = raw[eol + 1:]
-    hi = -1
-    for marker in PG_ENDS:
-        i = raw.find(marker)
-        if i >= 0 and (hi < 0 or i < hi):
-            hi = i
-    if hi >= 0:
-        raw = raw[:hi]
-    lead = raw.lstrip(b" \t\r\n")
-    m = _CREDITS.match(lead[:4096])
-    if m:  # only if it sits at the very top of the remaining text
-        raw = lead[m.end():]
-    return raw
-
-
-def to_utf8(raw: bytes) -> bytes:
-    """Normalize mixed PG encodings (ascii/latin-1/cp1252/utf-8) to UTF-8."""
-    if raw.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
-        raw = raw[3:]
-    try:
-        raw.decode("utf-8")
-        return raw
-    except UnicodeDecodeError:
-        return raw.decode("cp1252", errors="replace").encode("utf-8")
 
 
 # Function-word profiles for the Latin-family curriculum (D4).
@@ -264,38 +209,63 @@ def iter_wiki_xml(lang: str, path: str):
             yield doc, f"{lang}|||{Path(path).name}:{title}", "wikixml"
 
 
-def iter_gutenberg(root: Path):
-    for fp in sorted(root.rglob("*.txt")):
-        try:
-            raw = fp.read_bytes()
-        except OSError:
-            continue
-        doc = sanitize(strip_gutenberg_wrapper(to_utf8(raw)))
-        if doc:
-            yield doc, str(fp), "gutenberg"
+def _clean_book(fp: Path):
+    """Worker: read + clean + sanitize + fingerprint one PG file."""
+    try:
+        raw = fp.read_bytes()
+    except OSError:
+        return None
+    doc, st = pg.clean(raw)
+    doc = sanitize(doc).strip()
+    return doc, str(fp), st, pg.fingerprint(doc), detect_lang(doc)
 
 
-def iter_docs(args):
+def iter_gutenberg(root: Path, jobs: int, stats: dict):
+    files, nvar = pg.pick_variants(sorted(root.rglob("*.txt")))
+    g = stats.setdefault("gutenberg", {
+        "files_variant_dropped": nvar, "files": len(files), "neardup": 0,
+        "guarded": 0, "header_bytes": 0, "footer_bytes": 0,
+        "para_bytes": 0, "paras": 0, "inline_notes": 0})
+    nd = pg.NearDup()
+    with mp.Pool(jobs or None) as pool:
+        for res in pool.imap(_clean_book, files, chunksize=8):
+            if res is None:
+                continue
+            doc, src, st, fp, lang = res
+            g["guarded"] += st.guarded
+            g["header_bytes"] += st.header
+            g["footer_bytes"] += st.footer
+            g["para_bytes"] += st.para_bytes
+            g["paras"] += st.paras
+            g["inline_notes"] += st.inline
+            if not doc:
+                continue
+            if nd.check_add(fp) >= 0:
+                g["neardup"] += 1
+                continue
+            yield doc, src, "gutenberg", lang
+
+
+def iter_docs(args, stats: dict):
+    """Yields (doc, src, kind, lang or None)."""
     for spec in args.wiki_xml:
         lang, _, path = spec.partition("=")
-        yield from iter_wiki_xml(lang, path)
+        for doc, src, kind in iter_wiki_xml(lang, path):
+            yield doc, src, kind, lang
     if args.wiki_defs:
         p = Path(args.wiki_defs)
         with open(p, "rb") as f:
             for lineno, line in enumerate(f):
                 d = sanitize(doc_from_wiki_line(line) or b"")
                 if d:
-                    yield d, f"{p.name}#{lineno}", "wiki2017"
-    for d in [Path(args.gutenberg_dir)] if args.gutenberg_dir else []:
-        for fp in sorted(d.glob("*.txt")):
-            yield sanitize(strip_gutenberg_wrapper(to_utf8(fp.read_bytes()))), str(fp), "gutenberg"
+                    yield d, f"{p.name}#{lineno}", "wiki2017", "en"
     if args.gutenberg_tree:
-        yield from iter_gutenberg(Path(args.gutenberg_tree))
+        yield from iter_gutenberg(Path(args.gutenberg_tree), args.jobs, stats)
     if args.corpus_dir:
         d = Path(args.corpus_dir)
         for fp in sorted(d.iterdir()):
             if fp.is_file() and fp.suffix == ".txt":
-                yield sanitize(to_utf8(fp.read_bytes())), str(fp), "textcorpus"
+                yield sanitize(pg.to_utf8(fp.read_bytes())), str(fp), "textcorpus", None
 
 
 def verify(out: Path) -> dict:
@@ -360,17 +330,13 @@ def build(args):
         docs_in_shard = []
 
     allowed = set(args.langs.split(","))
-    for doc, src, kind in iter_docs(args):
+    for doc, src, kind, lang in iter_docs(args, stats):
         stats["docs_in"] += 1
         doc = doc.strip()  # invariant: docs never start/end with whitespace,
         if len(doc) < args.min_doc_bytes:  # so SEP boundaries are unambiguous
             stats["docs_short"] += 1
             continue
-        if kind == "wiki2017":
-            lang = "en"  # English Wikipedia 2017 definitions dump
-        elif kind == "wikixml":
-            lang = src.split("|||", 1)[0]  # declared by --wiki-xml LANG=PATH
-        else:
+        if lang is None:
             lang = detect_lang(doc)
         if lang not in allowed:
             stats["docs_langskip"] = stats.get("docs_langskip", 0) + 1
@@ -387,7 +353,7 @@ def build(args):
         off = len(buf)  # AFTER the separator: off points at the doc itself
         buf += doc
         docs_in_shard.append({"off": off, "len": len(doc), "src": src,
-                              "lang": lang})
+                              "kind": kind, "lang": lang})
         stats["docs_out"] += 1
         stats["bytes_out"] += len(doc)
         stats["by_kind"][kind] = stats["by_kind"].get(kind, 0) + 1
@@ -399,7 +365,7 @@ def build(args):
 
     stats["verify"] = verify(out)
     (out / "dataset.json").write_text(json.dumps(
-        {"version": 0, "created": int(time.time()),
+        {"version": 1, "created": int(time.time()),
          "separator": SEP.decode(), "stats": stats}, indent=2) + "\n")
     print(json.dumps(stats, indent=2))
     if stats["verify"]["problems"]:
@@ -409,7 +375,6 @@ def build(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--gutenberg-dir")
     ap.add_argument("--gutenberg-tree")
     ap.add_argument("--corpus-dir")
     ap.add_argument("--wiki-defs")
@@ -418,6 +383,7 @@ def main():
                     help="MediaWiki pages-articles dump (repeatable)")
     ap.add_argument("--langs", default="en,de,fr,es,it,pt,nl")
     ap.add_argument("--max-docs", type=int, default=0)
+    ap.add_argument("--jobs", type=int, default=0)
     ap.add_argument("--shard-bytes", type=int, default=64 << 20)
     ap.add_argument("--min-doc-bytes", type=int, default=64)
     build(ap.parse_args())
