@@ -54,6 +54,9 @@ def tables(device) -> dict[str, torch.Tensor]:
             "dec16": torch.from_numpy(DEC16).to(device),
             "thr16": torch.from_numpy(THR16[1:].copy()).to(device),
             "dec16_1": torch.from_numpy(DEC16[1:].copy()).to(device),
+            # thr8x[k] = THR8[k] for k = 1..127, thr8x[0] = -inf, thr8x[128] = +inf
+            "thr8x": torch.from_numpy(np.concatenate(
+                [[-np.inf], THR8[1:], [np.inf]]).astype(np.float32)).to(device),
         }
     return t
 
@@ -89,6 +92,20 @@ def decode8(q: torch.Tensor, scale) -> torch.Tensor:
 
 def rt8(x: torch.Tensor, scale=SCALE) -> torch.Tensor:
     return decode8(encode8(x, scale), scale)
+
+
+def rt8_fast(x: torch.Tensor, scale) -> torch.Tensor:
+    """rt8 without searchsorted (elementwise + two gathers, compiles well),
+    bit-identical to rt8: estimate the code from log2, then correct it by
+    one against the canonical thresholds (code k <=> THR8[k] <= a < THR8[k+1])."""
+    T = tables(x.device)
+    s = _f32(scale, x.device)
+    a = torch.nan_to_num(x.abs() * s, nan=0.0)
+    c = torch.floor(torch.log2(a + 1.0) * 10.0 + 0.5).clamp(0, MAX_CODE).long()
+    thr = T["thr8x"]
+    c = c + (a >= thr[c + 1]).long() - (a < thr[c]).long()
+    m = T["dec8"][c] / s
+    return torch.where(x < 0, -m, m)
 
 
 def _sr_pick(dec_1: torch.Tensor, dec: torch.Tensor, maxc: int,
@@ -220,6 +237,29 @@ class _QFxMaxRel(torch.autograd.Function):
         return g * keep, None
 
 
+class _QActT(torch.autograd.Function):
+    """Byte-grid STE at a tensor (power-of-two) scale; gradient 0 where
+    the value clamped at the top of the grid."""
+
+    @staticmethod
+    def forward(ctx, x, s):
+        lim = _f32(DEC8[MAX_CODE], x.device) / s
+        ctx.save_for_backward(x.abs() <= lim)
+        return rt8_fast(x, s)
+
+    @staticmethod
+    def backward(ctx, g):
+        (keep,) = ctx.saved_tensors
+        return g * keep, None
+
+
+PROB_SCALE = 4096.0     # pow2_scale(1.0): softmax probabilities in [0, 1]
+
+
+def act_fixed(x: torch.Tensor, scale: float) -> torch.Tensor:
+    return _QActT.apply(x, _f32(scale, x.device))
+
+
 def logit_maxrel(x: torch.Tensor, step=FXSTEP) -> torch.Tensor:
     return _QFxMaxRel.apply(x, step)
 
@@ -238,6 +278,11 @@ class QuantConfig:
     pure_int: bool = False   # gradients on the byte grid before the optimizer
     scale: float = SCALE
     fxstep: float = float(FXSTEP)
+    # transformer forward (models/transformer.QAT); enabled = weight storage
+    acts: bool = False
+    resid: str = "fp"
+    softmax: str = "none"
+    probs: bool = False
 
     def act(self, x: torch.Tensor) -> torch.Tensor:
         return _QAct.apply(x, self.scale) if self.enabled else x

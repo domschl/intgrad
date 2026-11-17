@@ -117,10 +117,69 @@ class CausalConv(nn.Module):
         return y
 
 
+class QSite(nn.Module):
+    """One activation site on the byte grid with a delayed power-of-two
+    scale: the scale comes from the amax history of the last `hist`
+    training forwards times `headroom` (no pass over the current tensor,
+    causal, and fixed at eval). Values above the window clamp (STE gradient
+    0 there); the window reaches 17.5 octaves down. Before any history
+    exists, the current amax is used."""
+
+    def __init__(self, hist: int = 16, headroom: float = 2.0):
+        super().__init__()
+        self.register_buffer("hist", torch.zeros(hist))
+        self.register_buffer("clamp", torch.zeros(()))   # last training clamp rate
+        self.headroom = headroom
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cur = x.detach().abs().amax().float()
+        hm = self.hist.max()
+        s = Q.pow2_scale(torch.where(hm > 0, hm * self.headroom, cur))
+        if self.training:
+            with torch.no_grad():
+                self.hist.copy_(torch.cat([self.hist[1:], cur.view(1)]))
+                lim = float(Q.DEC8[Q.MAX_CODE]) / s
+                self.clamp.copy_((x.detach().abs() > lim).float().mean())
+        return Q._QActT.apply(x, s)
+
+
+def _sites(names: str, on: bool) -> nn.ModuleDict:
+    return nn.ModuleDict({n: QSite() for n in names.split()} if on else {})
+
+
+def _q(sites: nn.ModuleDict, name: str, x: torch.Tensor) -> torch.Tensor:
+    return sites[name](x) if name in sites else x
+
+
+@dataclass(frozen=True)
+class QAT:
+    """Quantization-aware forward (plan/001 M4). Weights are quantized by
+    their storage (Lion master codes, quant.enabled); this covers the rest.
+    acts:    activation sites on the byte grid at per-tensor pow2 absmax
+    resid:   "fp" (residual stream wide) or "q8" (byte grid after each add)
+    softmax: "none" or "maxrel" (attention scores and logits, 001-D12)
+    probs:   attention probabilities on the byte grid at scale 4096"""
+    acts: bool = False
+    resid: str = "fp"
+    softmax: str = "none"
+    probs: bool = False
+
+    def __post_init__(self):
+        if self.resid not in ("fp", "q8") or self.softmax not in ("none", "maxrel"):
+            raise ValueError(f"bad QAT config {self}")
+
+    @property
+    def explicit_attn(self) -> bool:
+        return self.softmax != "none" or self.probs
+
+
 class Block(nn.Module):
     def __init__(self, d: int, H: int, L: int, qk_norm: bool = True,
-                 qkv_conv: int = 0):
+                 qkv_conv: int = 0, qat: QAT = QAT()):
         super().__init__()
+        self.qat = qat
+        self.qs = _sites("n1 q k v attn n2 up mlp", qat.acts)
+        self.rs = _sites("r1 r2", qat.resid == "q8")
         self.H, self.dh = H, d // H
         self.qk_norm = qk_norm
         # Primer-style causal depthwise conv on q, k, v (kernel qkv_conv)
@@ -139,9 +198,27 @@ class Block(nn.Module):
         for lin in (self.o, self.down):                   # residual branches
             nn.init.normal_(lin.weight, std=0.02 / math.sqrt(2 * L))
 
+    def attend(self, q, k, v):
+        """Causal attention; explicit when scores or probabilities are
+        quantized (SDPA never materializes them)."""
+        qat = self.qat
+        if not qat.explicit_attn:
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        T = q.shape[-2]
+        causal = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
+        s = (q @ k.transpose(-1, -2)) * (1.0 / math.sqrt(self.dh))
+        s = s.masked_fill(~causal, float("-inf"))
+        if qat.softmax == "maxrel":
+            s = Q.logit_maxrel(s).masked_fill(~causal, float("-inf"))
+        p = torch.softmax(s, -1)
+        if qat.probs:
+            p = Q.act_fixed(p, Q.PROB_SCALE)
+        return p @ v
+
     def forward(self, x, rope, tap: Tap | None = None, i: int = 0):
         B, T, d = x.shape
-        h = self.n1(x)
+        qs, rs = self.qs, self.rs
+        h = _q(qs, "n1", self.n1(x))
         qkv = self.qkv(h)
         if self.qkv_conv is not None:
             qkv = self.qkv_conv(qkv)
@@ -149,8 +226,8 @@ class Block(nn.Module):
         if self.qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
         q, k = apply_rope(q, *rope), apply_rope(k, *rope)
-        a = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        a = a.transpose(1, 2).reshape(B, T, d)
+        q, k, v = _q(qs, "q", q), _q(qs, "k", k), _q(qs, "v", v)
+        a = _q(qs, "attn", self.attend(q, k, v).transpose(1, 2).reshape(B, T, d))
         if tap is not None:
             tap(f"norm{i}.attn_in", h)
             tap(f"q{i}", q)
@@ -161,15 +238,15 @@ class Block(nn.Module):
             tap(f"scores{i}", s[..., mask])
             tap.rel(f"scores{i}", s, mask)
             tap(f"attn_out{i}", a)
-        x = x + self.o(a)
-        h = self.n2(x)
-        u = self.up(h)
-        m = torch.relu(u).square()
+        x = _q(rs, "r1", x + self.o(a))
+        h = _q(qs, "n2", self.n2(x))
+        u = _q(qs, "up", self.up(h))
+        m = _q(qs, "mlp", torch.relu(u).square())
         if tap is not None:
             tap(f"norm{i}.mlp_in", h)
             tap(f"mlp_pre{i}", u)
             tap(f"mlp_post{i}", m)
-        x = x + self.down(m)
+        x = _q(rs, "r2", x + self.down(m))
         if tap is not None:
             tap(f"resid{i}", x)
         return x
@@ -179,7 +256,7 @@ class ByteTransformer(nn.Module):
     def __init__(self, d: int, L: int, H: int, T: int, zloss: float = 1e-4,
                  softcap: float = 0.0, qk_norm: bool = True,
                  stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0,
-                 logit_quant: str = "none"):
+                 logit_quant: str = "none", qat: QAT | dict | None = None):
         """stem "embed": tied 256 x d embedding / output head (baseline).
         stem "conv": 256 x stem_dim embedding -> causal conv stem_dim -> d
         (kernel 4) -> + causal depthwise conv (kernel 4, dilation 2) on
@@ -191,6 +268,10 @@ class ByteTransformer(nn.Module):
         if logit_quant not in ("none", "fx", "maxrel"):
             raise ValueError(f"logit_quant {logit_quant!r}")
         self.logit_quant = logit_quant      # logits-only QAT (X12)
+        self.qat = qat = QAT(**qat) if isinstance(qat, dict) else (qat or QAT())
+        if qat.softmax == "maxrel":
+            self.logit_quant = "maxrel"
+        self.qs = _sites("emb nf", qat.acts)
         if stem == "embed":
             self.emb = nn.Embedding(256, d)
             nn.init.normal_(self.emb.weight, std=0.02)
@@ -206,7 +287,7 @@ class ByteTransformer(nn.Module):
             nn.init.normal_(self.head.weight, std=0.02)
         else:
             raise ValueError(f"unknown stem {stem!r}")
-        self.blocks = nn.ModuleList(Block(d, H, L, qk_norm, qkv_conv) for _ in range(L))
+        self.blocks = nn.ModuleList(Block(d, H, L, qk_norm, qkv_conv, qat) for _ in range(L))
         self.nf = nn.RMSNorm(d)
         self._rope = None
 
@@ -237,7 +318,7 @@ class ByteTransformer(nn.Module):
         """x: [B, T] bytes -> logits [B, T, 256] (float32).
         mid_hook(h_mid) -> h_mid' may read or replace the mid-stack latent
         [B, T, d] (plan 002: recurrence, memory)."""
-        h = self.embed(x)
+        h = _q(self.qs, "emb", self.embed(x))
         if tap is not None:
             tap("emb", h)
         rope = self.rope(x.device)
@@ -248,7 +329,7 @@ class ByteTransformer(nn.Module):
                 if mid_hook is not None:
                     h = mid_hook(h)
             h = blk(h, rope, tap, i)
-        logits = F.linear(self.nf(h), self.head_weight()).float()
+        logits = F.linear(_q(self.qs, "nf", self.nf(h)), self.head_weight()).float()
         if self.softcap > 0:
             logits = self.softcap * torch.tanh(logits / self.softcap)
         if self.logit_quant == "fx":
@@ -304,6 +385,8 @@ class ByteTransformer(nn.Module):
     def sample(self, prompt: torch.Tensor, n: int, temp: float = 0.8,
                generator: torch.Generator | None = None) -> torch.Tensor:
         """prompt [B, P] bytes -> [B, n] sampled continuation bytes."""
+        was = self.training
+        self.eval()                       # frozen quantization scales
         x = prompt.long()
         out = []
         for _ in range(n):
@@ -311,6 +394,7 @@ class ByteTransformer(nn.Module):
             nxt = torch.multinomial(torch.softmax(lg, -1), 1, generator=generator)
             out.append(nxt)
             x = torch.cat([x, nxt], 1)
+        self.train(was)
         return torch.cat(out, 1).to(torch.uint8)
 
 

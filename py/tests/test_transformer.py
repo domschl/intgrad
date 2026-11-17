@@ -113,3 +113,56 @@ def test_depthwise_shift_path_matches_conv1d(k, dil):
     x = torch.randn(2, 9, 12)
     ref = c.conv(F.pad(x.transpose(1, 2), (c.pad, 0))).transpose(1, 2)
     assert torch.allclose(c(x), ref, atol=1e-6)
+
+
+QAT_ALL = dict(acts=True, resid="q8", softmax="maxrel", probs=True)
+
+
+def test_explicit_attention_matches_sdpa():
+    from types import SimpleNamespace
+    m = tiny()
+    blk = m.blocks[0]
+    q, k, v = (torch.randn(2, 2, 16, 16) for _ in range(3))
+    ref = blk.attend(q, k, v)
+    blk.qat = SimpleNamespace(explicit_attn=True, softmax="none", probs=False)
+    assert torch.allclose(blk.attend(q, k, v), ref, atol=1e-5)
+
+
+def test_qat_sites_put_activations_on_the_grid():
+    from intgrad import quant as Q
+    m = tiny(qat=QAT_ALL)
+    seen = {}
+    for name, mod in m.named_modules():
+        if type(mod).__name__ == "QSite":
+            mod.register_forward_hook(lambda md, i, o, n=name: seen.__setitem__(n, (o, md)))
+    m(torch.randint(0, 256, (2, 16)))
+    assert len(seen) == 2 + 2 * (8 + 2)
+    for n, (o, md) in seen.items():                         # on the grid at some pow2 scale
+        o = o.detach()
+        assert any(torch.equal(Q.rt8(o, 2.0 ** e), o) for e in range(-10, 30)), n
+
+
+def test_qat_model_is_causal_after_warmup_and_has_gradients():
+    m = tiny(qat=QAT_ALL)
+    x = torch.randint(0, 256, (2, 16))
+    m(x)                                                   # fill the scale histories
+    m.eval()
+    x2 = x.clone()
+    x2[:, 10:] = (x2[:, 10:] + 1) % 256
+    a, b = m(x), m(x2)
+    assert torch.equal(a[:, :10], b[:, :10])
+    m.train()
+    loss, _ = m.loss(m(x), x)
+    loss.backward()
+    assert all(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+
+
+def test_qat_scales_are_frozen_in_eval():
+    m = tiny(qat=QAT_ALL)
+    x = torch.randint(0, 256, (2, 16))
+    m(x)
+    h = [s.hist.clone() for s in m.modules() if type(s).__name__ == "QSite"]
+    m.eval()
+    m(x * 0 + 7)
+    assert all(torch.equal(a, s.hist) for a, s in
+               zip(h, (s for s in m.modules() if type(s).__name__ == "QSite")))

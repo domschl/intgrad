@@ -59,6 +59,8 @@ float ig_pow2_scale(float mx);
 void  ig_set_fxstep(float step); /* default 0.1 -> range ±12.7 */
 float ig_get_fxstep(void);
 float ig_fx_roundtrip(float x);
+/* max-relative fixed point of one softmax row (n values), 001-D12 */
+void  ig_fx_maxrel(const float *x, float *out, int n);
 
 /* 16-bit symlog grid: code = sign * M, M in units of DELTA/256.
  * u < 0 -> round to nearest (half up), u in [0,1) -> SR. */

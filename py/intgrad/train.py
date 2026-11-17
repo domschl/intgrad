@@ -34,7 +34,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULTS = {
     "name": "run",
     "model": {"kind": "mlp", "ctx": 4, "hidden": 96},
-    "quant": {"enabled": True, "w2": True, "w2_sr": False, "sr": True, "pure_int": False},
+    "quant": {"enabled": True, "w2": True, "w2_sr": False, "sr": True, "pure_int": False,
+              # transformer only (M4): enabled = weight storage; forward sites:
+              "acts": False, "resid": "fp", "softmax": "none", "probs": False},
     "train": {"steps": 4000, "batch": 32, "lr": 2e-3, "wd": 0.1, "warmup": 200,
               "sched": "cosine", "seed": 42, "log_every": 100, "eval_every": 0,
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
@@ -69,12 +71,14 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
         from intgrad.models.mlp import ByteMLP
         return ByteMLP(m["ctx"], m["hidden"], qc, generator=gen)
     if m["kind"] == "transformer":
-        if qc.enabled:
-            raise ValueError("quantized transformer arrives in M4: set quant.enabled = false")
         from intgrad.models import transformer
         kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
                                 "stem", "stem_dim", "qkv_conv", "logit_quant") if k in m}
-        return transformer.build(m.get("preset"), **kw)
+        qat = transformer.QAT(acts=qc.acts, resid=qc.resid, softmax=qc.softmax, probs=qc.probs)
+        model = transformer.build(m.get("preset"), qat=qat, **kw)
+        for p in model.parameters():          # weights start on their grid
+            qc.project_(p)
+        return model
     raise ValueError(f"unknown model kind {m['kind']!r}")
 
 

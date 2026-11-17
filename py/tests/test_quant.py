@@ -64,3 +64,23 @@ def test_maxrel_logits_grid_and_gradient():
     assert torch.allclose(d, torch.tensor([[0.0, -0.1, -12.0, -25.5]]), atol=1e-5)
     y.sum().backward()
     assert x.grad.tolist() == [[1.0, 1.0, 1.0, 0.0]]       # only the clamped one is cut
+
+
+def test_rt8_fast_is_bit_identical_to_rt8():
+    g = torch.Generator().manual_seed(1)
+    x = torch.exp2(torch.rand(200_000, generator=g) * 40 - 25) * torch.sign(torch.randn(200_000, generator=g))
+    thr = torch.from_numpy(Q.THR8[1:].copy()) / Q.SCALE           # exact boundaries and neighbours
+    edges = torch.cat([thr, torch.nextafter(thr, torch.zeros_like(thr)),
+                       torch.nextafter(thr, torch.full_like(thr, 1e9))])
+    x = torch.cat([x, edges, -edges, torch.tensor([0.0, -0.0, 1e30, -1e30, float("nan")])])
+    for s in (Q.SCALE, 2.0 ** -3, 2.0 ** 9):
+        a, b = Q.rt8(x * (Q.SCALE / s), s), Q.rt8_fast(x * (Q.SCALE / s), s)
+        assert torch.equal(a, b)
+
+
+def test_act_fixed_ste_cuts_only_clamped():
+    x = torch.tensor([0.5, -1.0, 2.0, 1e-7], requires_grad=True)
+    y = Q.act_fixed(x, Q.PROB_SCALE)                  # window top 6653/4096 = 1.62
+    assert torch.equal(y.detach(), Q.rt8(x.detach(), Q.PROB_SCALE))
+    y.sum().backward()
+    assert x.grad.tolist() == [1.0, 1.0, 0.0, 1.0]

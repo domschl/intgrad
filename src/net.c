@@ -281,9 +281,17 @@ static void lion_ensure(long total, long maxgroup)
     }
 }
 
+static float lion_b1 = 0.9f, lion_b2 = 0.99f;
+
+void ig_set_lion_betas(float b1, float b2)
+{
+    lion_b1 = b1;
+    lion_b2 = b2;
+}
+
 void ig_mlp_lion_update(ig_MLP *m, float lr)
 {
-    const float b1 = 0.9f, b2 = 0.99f;
+    const float b1 = lion_b1, b2 = lion_b2;
     ig_Value **l[IG_NGROUPS];
     long ns[IG_NGROUPS], maxg = 0;
     int ng = ig_mlp_groups(m, l, ns);

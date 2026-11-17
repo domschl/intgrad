@@ -130,6 +130,21 @@ float ig_fx_roundtrip(float x)
     return (float)lroundf(q) * g_fxstep;
 }
 
+/* Max-relative fixed point (001-D12), one softmax row of n values:
+ * d = x - max(x) is stored as an unsigned byte r in 0..255 on the grid
+ * -r * step (clamp below -255 steps, round half away from zero), and
+ * out = max + (-r) * step. */
+void ig_fx_maxrel(const float *x, float *out, int n)
+{
+    float m = x[0];
+    for (int i = 1; i < n; i++) if (x[i] > m) m = x[i];
+    for (int i = 0; i < n; i++) {
+        float q = (x[i] - m) / g_fxstep;
+        if (q < -255.0f) q = -255.0f;
+        out[i] = m + (float)lroundf(q) * g_fxstep;
+    }
+}
+
 /* ---- 16-bit grid ------------------------------------------------------ */
 
 int16_t ig_enc16(float x, float u, float scale)

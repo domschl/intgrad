@@ -1,0 +1,21 @@
+# M4 quantization stages on S (plan/001 §5 M4); override per stage with --set
+name = "m4-s"
+
+[model]
+kind = "transformer"
+preset = "S"
+qkv_conv = 3
+
+[quant]
+enabled = false
+
+[train]
+steps = 4000
+batch = 64
+warmup = 300
+lr = 3e-3
+wd = 3.0
+betas = [0.95, 0.98]
+log_every = 200
+telemetry_every = 2000
+compile = true

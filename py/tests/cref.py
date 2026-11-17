@@ -34,6 +34,7 @@ def load():
         "ig_mlp_window_backward": (C.c_double, [vp, vp]), "ig_mlp_logits": (None, [vp, vp, vp]),
         "ig_mlp_lion_update": (None, [vp, f]), "ig_mlp_zero_grad": (None, [vp]),
         "ig_mlp_scale_grads": (None, [vp, f]), "ig_mlp_opt_reset": (None, []),
+        "ig_set_lion_betas": (None, [f, f]), "ig_fx_maxrel": (None, [vp, vp, C.c_int]),
         "ig_set_modes": (None, [C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, f]),
     }
     for name, (res, args) in sig.items():

@@ -5,7 +5,7 @@
  *
  *   ig-train [--index IDX | --data FILE] [--steps N] [--ctx N] [--hidden N]
  *            [--lr F] [--batch N] [--warmup N] [--sched cosine|const]
- *            [--wd F] [--eval-every N] [--eval-windows N]
+ *            [--wd F] [--betas B1 B2] [--eval-every N] [--eval-windows N]
  *            [--save P] [--save-every N] [--load P] [--sample N] [--seed N]
  *            [--no-quant] [--pure-int] [--grad-stats] [--w1] [--w2-sr]
  *
@@ -106,6 +106,10 @@ int main(int argc, char **argv)
 #undef IOPT
         else if (!strcmp(a, "--lr") && has) lr = (float)atof(argv[++i]);
         else if (!strcmp(a, "--wd") && has) ig_wd = (float)atof(argv[++i]);
+        else if (!strcmp(a, "--betas") && i + 2 < argc) {
+            float b1 = (float)atof(argv[++i]);
+            ig_set_lion_betas(b1, (float)atof(argv[++i]));
+        }
         else if (!strcmp(a, "--sched") && has) {
             const char *s = argv[++i];
             if (!strcmp(s, "const")) sched_cosine = 0;

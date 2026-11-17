@@ -62,6 +62,8 @@ extern int ig_sr;
  * grid with a per-tensor pow2 absmax scale (float when quant is off). */
 extern float ig_wd; /* decoupled weight decay, default 0.1 */
 void ig_mlp_lion_update(ig_MLP *m, float lr);
+/* Lion betas (default 0.9, 0.99; the transformer uses 0.95, 0.98, X7). */
+void ig_set_lion_betas(float b1, float b2);
 void ig_mlp_opt_reset(void);
 
 /* Counters since the last reset over nonzero parameter steps (quant mode):

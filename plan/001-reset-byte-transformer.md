@@ -351,6 +351,29 @@ fixed byte budget; S beats xz and the 5-gram on eval-v1; throughput
 measured and recorded (estimate: S ≥ 300 kB/s on the 4070 Ti).
 
 ### M4 — Quantized transformer (the core result of plan 001)
+**Status (started 2026-11-17).** Built:
+- `quant.acts` / `resid` / `softmax` / `probs` switches. `quant.enabled` is
+  the weight storage (Lion 16-bit master codes, forward = high byte).
+- `QSite` activation sites with a delayed pow2 scale: amax history of 16
+  training forwards × 2 headroom. This keeps the forward causal and fixes
+  the scale at eval.
+- Explicit attention whenever scores or probabilities are quantized.
+- `rt8_fast`: exact byte rounding without searchsorted.
+- C oracle: configurable Lion betas and `ig_fx_maxrel`, both bit-exact.
+
+Throughput at S: full quantization runs 2.1× slower than fp.
+
+Schedule (GPU time):
+
+| phase | runs | time |
+|---|---|---|
+| A: stages a–e at S | 2 seeds | ≈ 2 h |
+| B: learned scales vs delayed absmax (D10) | — | ≈ 1.5 h |
+| C: w1-SR vs w2, log vs linear int8 | — | ≈ 1 h |
+| D: gate at S and M, ladder horizon | quantized M ≈ 80 min per run | ≈ 4 h |
+| probes P1–P4, quantized | — | ≈ 0.5 h |
+| sensitivity sweep, only if the gate fails | — | + 2–3 h |
+
 **Per-tensor scaling (from the M3 telemetry).** So far only gradients and
 Lion momentum have per-tensor scales; all weights and activations share
 one global window (clamp ±26.0, underflow < 1.4e-4). Before (a) below,

@@ -79,6 +79,19 @@ def test_sr_16bit_fx_pow2_exact(device):
     assert eq(cvec(L.ig_pow2_scale, mx), t_s)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_fx_maxrel_exact(device):
+    rng = np.random.default_rng(5)
+    rows = [rng.normal(0, s, 256).astype(np.float32) for s in (0.3, 3.0, 10.0, 40.0)]
+    half = (np.float32(5.0) - np.arange(300, dtype=np.float32) * np.float32(0.05)).astype(np.float32)
+    rows += [half[:256], np.zeros(256, np.float32), np.full(256, -7.0, np.float32)]
+    for r in rows:
+        out = np.empty_like(r)
+        L.ig_fx_maxrel(ptr(r), ptr(out), len(r))
+        t = Q.logit_maxrel(torch.from_numpy(r).to(device)[None])[0].cpu().numpy()
+        assert np.array_equal(out.view(np.uint32), t.view(np.uint32))
+
+
 # ---------------------------------------------------------------- Lion + MLP
 
 CTX, NH = 3, 8
@@ -112,7 +125,8 @@ def torch_model(device, qc, data):
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("mode", ["float", "w2", "w2_sr", "w1_sr", "w1_rtn", "w2_pure_int"])
-def test_lion_step_bit_exact(device, mode):
+@pytest.mark.parametrize("betas", [(0.9, 0.99), (0.95, 0.98)])
+def test_lion_step_bit_exact(device, mode, betas):
     quant = mode != "float"
     w2 = mode.startswith("w2")
     w2_sr, sr, pure = mode == "w2_sr", mode != "w1_rtn", mode.endswith("pure_int")
@@ -127,7 +141,9 @@ def test_lion_step_bit_exact(device, mode):
     seed = 0x1234_5678_9ABC_DEF1
     L.ig_sr_set_state(seed)
     lr = np.float32(3e-3)
+    L.ig_set_lion_betas(*betas)
     L.ig_mlp_lion_update(cm, lr)
+    L.ig_set_lion_betas(0.9, 0.99)
     c_data, c_wq = np.empty(n, np.float32), np.empty(n, np.int16)
     L.ig_mlp_export(cm, ptr(c_data), ptr(c_wq), None)
     c_mom = np.empty(n, np.float32)
@@ -137,7 +153,7 @@ def test_lion_step_bit_exact(device, mode):
     qc = Q.QuantConfig(enabled=quant, w2=w2, w2_sr=w2_sr, sr=sr, pure_int=pure)
     tm = torch_model(device, qc, data)
     xs = XorShift64(seed)
-    opt = Lion(tm.flat_params(), lr=float(lr), wd=0.1, qc=qc,
+    opt = Lion(tm.flat_params(), lr=float(lr), wd=0.1, qc=qc, betas=betas,
                sr_uniform=lambda k, dev: torch.from_numpy(xs.uniforms(k)).to(dev))
     off = 0
     for p in tm.flat_params():
