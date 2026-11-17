@@ -289,11 +289,42 @@ Training: random batcher, Lion (start: lr 2e-3, wd 0.1, β 0.9/0.99),
 warmup + cosine, fp32 master + TF32 matmuls in fp mode. Eval on eval-v1
 every N steps. Samples are written to `runs/` only (D5).
 
+**Magnitude control (001-D9, from X5/X6).** Lion grows weights and
+activations without bound when gradients keep their sign, and under byte
+numerics clamped values get no gradient. M3 therefore builds in, from the
+first run:
+- pre-RMSNorm everywhere, **QK-norm** (RMSNorm on q and k: bounded
+  attention scores);
+- **z-loss** on the output logits (1e-4 · lse², keeps the normalizer near 0);
+- an optional **logit soft-cap** `c·tanh(x/c)` with c below the fixed-point
+  clamp (gradient stays alive). It is off by default and gets switched on
+  if telemetry shows logit clamping;
+- **range telemetry** per tensor class (embeddings, residual stream per
+  layer, normalized activations, q/k/v, attention scores, MLP pre/post
+  activation, logits, weights): absmax and |x| percentiles in octaves,
+  plus the rates that *would* clamp (> 26.0) or underflow (< 1.4e-4) on
+  the global byte grid. This is logged in fp runs too, so M4 knows which
+  tensors need their own scale before quantizing anything;
+- an early **Lion lr × wd sweep** on XS (3 × 3, P1/P2 and 2k-step bpb),
+  pulled forward from M5.
+
 Acceptance (fp mode): P2, P3, P4 pass at XS/S; the ladder is monotone at a
 fixed byte budget; S beats xz and the 5-gram on eval-v1; throughput
 measured and recorded (estimate: S ≥ 300 kB/s on the 4070 Ti).
 
 ### M4 — Quantized transformer (the core result of plan 001)
+**Per-tensor scaling (from the M3 telemetry).** So far only gradients and
+Lion momentum have per-tensor scales; all weights and activations share
+one global window (clamp ±26.0, underflow < 1.4e-4). Before (a) below,
+introduce per-tensor power-of-two scales where the telemetry demands it:
+weights per tensor (per output channel if their rows differ by octaves),
+activations by delayed absmax (amax history over recent steps, ~1 octave
+of headroom, so a kernel needs no extra pass), and a per-class
+fixed-point step for attention scores and logits. Decide explicitly how
+the residual stream is stored (byte grid with its own scale, or wider).
+Master weights re-encode when their scale changes (rare). Power-of-two
+scales are within the parity-verified contract (§4.2 tests 2⁻¹⁰ … 2²⁰).
+
 Turn on §2 numerics layer by layer, each step with its fp twin:
 (a) weights w2, (b) + activations, (c) + logits/attention scores on the
 fx grid, (d) + softmax probabilities, (e) + pure-int gradients. Then the
@@ -345,6 +376,11 @@ Deliverables: metric implemented, baseline numbers recorded,
   reserved bytes for now.
 - **001-D8 Eval protocol**: eval-v1 (§4.4) is the only number that goes
   into result tables. Test is evaluated only at plan close.
+- **001-D9 Lion stays; magnitudes are controlled by design (user
+  decision after X6).** The right lr works, and M3 builds in QK-norm,
+  z-loss, an optional soft-cap, range telemetry and an early lr × wd
+  sweep. There is no AdamW diagnostic twin in M3; that idea is revisited
+  only if we get stuck or data points at a shortcoming of Lion.
 
 ## 7. Pinned artifacts
 
@@ -435,6 +471,26 @@ modes reach the floor exactly. Consequence for M4: watch clamp rates per
 tensor class; levers are lr, a weak restoring gradient through the clamp
 ("leaky" STE), and range control (logit scale, normalization). The probe
 runs at lr 3e-3.
+
+**X6 — Is the saturation a Lion property? (2026-11-17).** Same probe
+as X5 at lr 1e-2, quantized forward, *float* storage, varying the
+optimizer. "Max |logit acc|" is the largest logit before the clamp.
+
+| optimizer | lr | wd | CE (floor 0.0324) | hidden clamped | max \|logit acc\| |
+|---|---|---|---|---|---|
+| Lion | 1e-2 | 0 / 0.1 / 1.0 | 0.108 / 0.046 / 0.035 | 33% / 18% / 0% | 14.9 k / 9.4 k / 507 |
+| Lion | 3e-3 | 0 | 0.0324 | 0% | 1.7 k |
+| AdamW | 1e-2 / 3e-2 / 1e-1 | 0 | 0.0324 | 0% | 16 / 18 / 31 |
+| SGD + momentum | 0.3 / 1.0 | 0 | 0.035 / 0.036 | 0% | 16 / 17 |
+| Lion, no quantization | 1e-2 | 0 | 0.0324 | (42% beyond 26) | 33.8 k |
+
+Verdict: the magnitude growth is a Lion property. The sign update keeps
+full size while gradients vanish, so only weight decay bounds it, and
+magnitudes grow 30–500× beyond AdamW/SGD. The damage comes from
+quantization: hidden values beyond the fixed ±26 window die under the
+clamp-masked STE. Clamped logits are mostly harmless, since the target
+pins at the top and the rest at the bottom. Countermeasures: 001-D9, M3
+magnitude control, M4 per-tensor scaling.
 
 ## 9. Risks
 
