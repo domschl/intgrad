@@ -102,3 +102,14 @@ def test_mid_hook_sees_and_can_replace_the_mid_latent():
     assert torch.allclose(base, m(x))
     changed = m(x, mid_hook=lambda h: h + 1.0)
     assert not torch.allclose(base, changed)
+
+
+@pytest.mark.parametrize("k,dil", [(3, 1), (4, 2)])
+def test_depthwise_shift_path_matches_conv1d(k, dil):
+    from intgrad.models.transformer import CausalConv
+    torch.manual_seed(0)
+    c = CausalConv(12, 12, k, dilation=dil, depthwise=True)
+    torch.nn.init.normal_(c.conv.weight)
+    x = torch.randn(2, 9, 12)
+    ref = c.conv(F.pad(x.transpose(1, 2), (c.pad, 0))).transpose(1, 2)
+    assert torch.allclose(c(x), ref, atol=1e-6)

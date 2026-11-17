@@ -34,3 +34,10 @@ def test_resume_is_bit_exact(tmp_path, quant):
     assert a["step"] == b["step"] == 40
     for k in a["model"]:
         assert torch.equal(a["model"][k], b["model"][k]), k
+
+
+def test_utf8_valid_fraction_allows_truncated_tail_only():
+    ok = "Grüße, 世界".encode()
+    samples = [ok, ok[:-1], ok[:3] + b"\xff" + ok[3:], b"\xc3"]
+    # whole; truncated in the last char (allowed); invalid byte inside; lone lead at end (allowed)
+    assert train.utf8_valid_fraction(samples) == 0.75

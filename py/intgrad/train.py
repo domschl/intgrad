@@ -39,7 +39,7 @@ DEFAULTS = {
               "sched": "cosine", "seed": 42, "log_every": 100, "eval_every": 0,
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
               "telemetry_every": 0, "samples": 0, "sample_len": 1024,
-              "compile": False, "final_eval": True,
+              "compile": False, "final_eval": True, "betas": [0.9, 0.99],
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
 }
@@ -162,7 +162,8 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     qc = QuantConfig(**q)
     model = build_model(cfg, qc, gen).to(dev)
     sr_gen = torch.Generator(device=dev).manual_seed(t["seed"] + 1)
-    opt = Lion(param_groups(model, t["wd"]), lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen)
+    opt = Lion(param_groups(model, t["wd"]), lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen,
+               betas=tuple(t["betas"]))
     ix = data.Index(idx_path)
     ctx = context_len(cfg, model)
     is_mlp = cfg_is_mlp(model)

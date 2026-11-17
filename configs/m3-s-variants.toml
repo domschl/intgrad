@@ -1,0 +1,19 @@
+# M3 architecture variants on S (D11): baseline; override per variant with --set
+name = "m3-s"
+
+[model]
+kind = "transformer"
+preset = "S"
+
+[quant]
+enabled = false
+
+[train]
+steps = 4000
+batch = 64
+warmup = 300
+lr = 3e-3
+wd = 3.0
+betas = [0.95, 0.98]
+log_every = 200
+telemetry_every = 2000

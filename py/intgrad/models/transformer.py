@@ -87,8 +87,22 @@ class CausalConv(nn.Module):
                 self.conv.weight[:, :, -1] = 1.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.conv.groups == self.conv.in_channels == self.conv.out_channels:
+            return self._depthwise(x)
         y = self.conv(F.pad(x.transpose(1, 2), (self.pad, 0)))
         return y.transpose(1, 2)
+
+    def _depthwise(self, x: torch.Tensor) -> torch.Tensor:
+        """Same result as the Conv1d path, as k shifted multiply-adds on
+        [B, T, C] (no transposes; Conv1d is slow for depthwise kernels)."""
+        w = self.conv.weight[:, 0, :]                    # [C, k]
+        k, dil, T = w.shape[1], self.conv.dilation[0], x.shape[1]
+        xp = F.pad(x, (0, 0, self.pad, 0))               # pad time on the left
+        y = xp[:, self.pad:self.pad + T] * w[:, -1]
+        for j in range(k - 1):                           # tap j looks back (k-1-j)*dil
+            off = self.pad - (k - 1 - j) * dil
+            y = y + xp[:, off:off + T] * w[:, j]
+        return y
 
 
 class Block(nn.Module):

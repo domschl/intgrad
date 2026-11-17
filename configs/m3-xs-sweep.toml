@@ -1,0 +1,16 @@
+# M3 Lion sweep on XS (lr x wd x betas via --set), fp
+name = "m3-xs"
+
+[model]
+kind = "transformer"
+preset = "XS"
+
+[quant]
+enabled = false
+
+[train]
+steps = 2000
+batch = 128
+warmup = 200
+log_every = 200
+telemetry_every = 1000

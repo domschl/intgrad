@@ -434,7 +434,9 @@ Deliverables: metric implemented, baseline numbers recorded,
   into result tables. Test is evaluated only at plan close.
 - **001-D11 Architecture variants are decided by data (user decision).**
   Conv stem, Primer-style q/k/v convolutions and width vs depth run as M3
-  comparisons (§5 M3). We keep what measurably helps.
+  comparisons (§5 M3). We keep what measurably helps. Outcome (X9): keep
+  the q/k/v conv (kernel 3); drop the conv stem (redundant with it) and
+  the deeper/narrower shape.
 - **001-D10 Learned quantization scales are an M4 experiment (user
   decision).** TQT/LSQ-style learned pow2 scales vs delayed absmax, with
   oscillation handled by Lion momentum, latent EMA or hysteresis
@@ -580,6 +582,56 @@ a dead end. P3 now runs at lr 1e-4, β (0.95, 0.98), batch 512, 5k steps.
 The transformer defaults follow from the corpus lr × wd × β sweep (M3).
 Note for M4: the C oracle hard-codes β (0.9, 0.99); it needs
 configurable betas before quantized parity runs at other values.
+
+**X8 — Lion sweep on the corpus, XS (2026-11-17).** XS (0.43 M), fp,
+2,000 steps × 128 × 256 B (65 MB), warmup 200, cosine; eval-v1 val bpb
+(chunk SE ≈ 0.013–0.015; seed-to-seed spread up to 0.05 at this horizon).
+`configs/m3-xs-sweep.toml`.
+
+| β | lr 3e-4 wd 0.1 / 1 | lr 1e-3 wd 0.1 / 1 / 3 / 10 | lr 3e-3 wd 0.1 / 1 / 3 / 10 | lr 1e-2 wd 1 / 3 |
+|---|---|---|---|---|
+| 0.9, 0.99 | 2.910 / 2.865 | 2.935 / 2.805 / – / – | 2.910 / 2.557 / – / – | – |
+| 0.95, 0.98 | 2.489 / 2.460 | 2.654 / 2.518 (s7 2.479) / 2.313 (s7 2.302) / 2.217 | 2.666 / 2.398 (s7 2.344) / **2.222 (s7 2.219)** / 2.239 | 2.254 / 2.228 |
+
+Verdict: β (0.95, 0.98) wins in every cell (X7 confirmed on the real
+task); weight decay must be far stronger than the inherited 0.1. The
+optimum is a plateau at lr·wd ≈ 0.01–0.03 (with RMSNorm the network is
+largely scale-invariant, so wd also raises the effective step size).
+**Transformer defaults: lr 3e-3, wd 3.0, β (0.95, 0.98)**, stable over 2
+seeds. XS beats the KN-5 baseline (2.415) by 0.19 bpb after 43 s. The
+horizon is short; the ladder runs re-check the optimum at larger budgets.
+
+Telemetry at the default (step 2,000) gives M4 input: **30% of logits
+exceed the fixed-point clamp ±12.7** (median |logit| ≈ 10, p99 ≈ 27, max
+35; z-loss pins lse near 0, so unlikely bytes sit at large negative
+logits). Attention scores clamp 0.9% (layer 1). Nothing else clamps; the
+mid-stack latent stays within the byte window (max 22, p99 ≈ 4). The logit
+grid's step/range (or the soft-cap) is the first M4 decision.
+
+**X9 — Architecture variants on S (D11, 2026-11-17).** S (≈ 3.2 M),
+fp, 4,000 steps × 64 × 512 B (131 MB), Lion lr 3e-3 wd 3 β (0.95, 0.98),
+warmup 300, cosine; eval-v1 val bpb, seeds 42 / 7.
+`configs/m3-s-variants.toml`.
+
+| variant | params | bpb s42 / s7 | mean | Δ | books / wiki-en / wiki-de / defs | speed (eager → compiled) |
+|---|---|---|---|---|---|---|
+| (a) baseline | 3.21 M | 1.7931 / 1.7932 | 1.7931 | – | 1.790 / 1.749 / 1.849 / 1.743 | 368 → 562 kB/s |
+| (b) conv stem | 3.26 M | 1.7572 / 1.7526 | 1.7549 | −0.038 | 1.752 / 1.711 / 1.807 / 1.711 | 345 |
+| (c) q/k/v conv | 3.22 M | 1.7413 / 1.7385 | **1.7399** | **−0.053** | 1.738 / 1.697 / 1.785 / 1.697 | 242 → 479 kB/s |
+| (d) d 192 × 7 | 3.15 M | 1.7654 / 1.7809 | 1.7732 | −0.020 | 1.770 / 1.731 / 1.826 / 1.729 | 298 |
+| (b) + (c) | 3.27 M | 1.7273 / 1.7398 | 1.7336 | −0.060 | (s42) 1.727 / 1.682 / 1.775 / 1.682 | – |
+
+Verdict: **keep (c)**, the causal depthwise conv on q, k, v (Primer): it is
+the largest single gain, consistent over seeds and sources. (b) helps
+alone but is redundant next to (c): the combination is only 0.006 better
+than (c), well inside the seed spread. Both inject local n-gram
+information, and once every layer has its own short conv the stem adds
+nothing measurable. (d) is marginal (0.02 at 0.016 spread) and 19%
+slower: dropped, so the current widths stay. The gains are similar across
+sources; wiki-de (most multi-byte characters) gains only slightly more.
+`torch.compile` is now the default for transformer training (+53% on S;
+q/k/v-conv overhead 35% → 15%). The conv stem stays in the code as a
+candidate front end for patching/hourglass designs (plan 002).
 
 ## 9. Risks
 

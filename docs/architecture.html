@@ -1,0 +1,288 @@
+<title>intgrad Byte Transformer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: schematic sheet — preset switcher, two diagrams side by side (stack | block), parameter table below. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5d6879; --line: #c9d0db;
+  --node: #eef1f6; --node-line: #9aa6b8; --accent: #0f7b74; --accent-soft: #dff1ef;
+  --fx: #a35a12; --fx-soft: #f6e9da;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --line: #333d4b;
+  --node: #222a35; --node-line: #4b5768; --accent: #43c2b7; --accent-soft: #163633;
+  --fx: #e0a060; --fx-soft: #3a2a19; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --line: #333d4b;
+  --node: #222a35; --node-line: #4b5768; --accent: #43c2b7; --accent-soft: #163633;
+  --fx: #e0a060; --fx-soft: #3a2a19; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.5;
+  padding-block: 28px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 22px; }
+h1 { font-size: 1.6rem; font-weight: 600; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+.sub { color: var(--muted); max-width: 70ch; margin: 4px 0 0; }
+.bar { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.seg button { font: 500 0.95rem var(--mono); color: var(--muted); background: transparent; border: 0; padding: 7px 16px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.facts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 0.9rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.facts b { color: var(--ink); font-weight: 500; }
+.grid { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 22px; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 16px 10px; min-width: 0; }
+.panel h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.svgbox { overflow-x: auto; }
+svg { display: block; width: 100%; height: auto; min-width: 300px; }
+svg text { font-family: var(--sans); fill: var(--ink); }
+svg .mono { font-family: var(--mono); font-size: 11.5px; fill: var(--muted); }
+svg .t { font-size: 13px; font-weight: 600; }
+svg .node { fill: var(--node); stroke: var(--node-line); stroke-width: 1; }
+svg .iface { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 4; }
+svg .iface-t { fill: var(--accent); }
+svg .fxn { fill: var(--fx-soft); stroke: var(--fx); stroke-width: 1; }
+svg .edge { stroke: var(--node-line); stroke-width: 1.4; fill: none; }
+svg .resid { stroke: var(--ink); stroke-width: 2.2; fill: none; }
+svg .arrowhead { fill: var(--node-line); }
+svg .plus { fill: var(--panel); stroke: var(--ink); stroke-width: 1.6; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.85rem; color: var(--muted); margin: 6px 0 4px; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; border: 1px solid var(--node-line); background: var(--node); }
+.sw.fx { background: var(--fx-soft); border-color: var(--fx); }
+.sw.if { background: var(--accent-soft); border: 1.5px dashed var(--accent); }
+.tbl { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+td.n { text-align: right; font-family: var(--mono); }
+td.s { font-family: var(--mono); color: var(--muted); }
+tr.tot td { font-weight: 600; border-bottom: 0; }
+.grid-tag { font-family: var(--mono); font-size: 0.78rem; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--node-line); color: var(--muted); }
+.grid-tag.fx { border-color: var(--fx); color: var(--fx); }
+.notes { color: var(--muted); font-size: 0.9rem; max-width: 80ch; display: grid; gap: 6px; }
+.notes p { margin: 0; }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>intgrad Byte Transformer</h1>
+    <p class="sub">Decoder-only model over raw UTF-8 bytes (vocabulary 256, no tokenizer), as built for plan/001 M3. Pick a preset to see every dimension. The dashed band marks the mid-stack latent interface where recurrence and memory experiments will attach.</p>
+  </header>
+
+  <div class="bar">
+    <div class="seg" role="group" aria-label="Model preset">
+      <button id="p-XS" data-p="XS">XS</button><button id="p-S" data-p="S">S</button><button id="p-Sdeep" data-p="S-deep">S-deep</button><button id="p-M" data-p="M">M</button><button id="p-L" data-p="L">L</button>
+    </div>
+    <div class="seg" role="group" aria-label="Variants">
+      <button id="v-stem" data-v="stem">conv stem</button><button id="v-qkv" data-v="qkv">q/k/v conv</button>
+    </div>
+    <div class="facts" id="facts"></div>
+  </div>
+
+  <section class="panel">
+    <h2>Variants tested on S (decision 001-D11, plan/001 X9: eval-v1 val bpb, mean of 2 seeds)</h2>
+    <div class="tbl"><table id="vtab"></table></div>
+  </section>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Stack</h2>
+      <div class="svgbox"><svg id="stack" viewBox="0 0 380 760" role="img" aria-label="Model stack from input bytes to loss"></svg></div>
+    </section>
+    <section class="panel">
+      <h2>One block (repeated L times)</h2>
+      <div class="svgbox"><svg id="block" viewBox="0 0 520 760" role="img" aria-label="Transformer block: attention and MLP sub-layers on the residual stream"></svg></div>
+      <div class="legend"><span><span class="sw"></span>byte symlog grid in M4 (weights, activations)</span><span><span class="sw fx"></span>fixed-point grid in M4 (scores, logits)</span><span><span class="sw if"></span>latent interface (plan 002)</span></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <h2>Parameters and tensor shapes</h2>
+    <div class="tbl"><table id="ptab"></table></div>
+  </section>
+
+  <section class="notes">
+    <p>Shapes use B = batch, T = context length, d = model width, H = heads, d<sub>h</sub> = d/H, f = 4d (MLP width). No biases. With the plain stem the output head reuses the embedding matrix (tied), so the 256 × d table is counted once; the conv stem has its own untied head. All convolutions are causal: position t sees bytes up to t only.</p>
+    <p>Magnitude control (decision 001-D9): pre-RMSNorm, QK-norm on queries and keys, z-loss 1e-4·lse² on the logits, optional soft-cap c·tanh(x/c) on the logits. Training: Lion, fp32 with TF32 in M3; byte numerics with per-tensor power-of-two scales in M4.</p>
+  </section>
+</div>
+
+<script>
+const P = {
+  XS: {d:128, L:2, H:4, T:256},
+  S:  {d:256, L:4, H:4, T:512},
+  "S-deep": {d:192, L:7, H:3, T:512},
+  M:  {d:384, L:6, H:6, T:1024},
+  L:  {d:512, L:8, H:8, T:1024},
+};
+const STEM_DIM = 32;
+// Variant results (plan/001 X9) are filled in once the runs finish.
+const VARIANTS = [
+  {id: "a", name: "Baseline", what: "plain tied 256 × d embedding", delta: "–", status: "1.793 bpb"},
+  {id: "b", name: "Conv stem", what: "256 × 32 embedding → causal conv 32 → d (k 4) → + causal depthwise conv (k 4, dilation 2); untied head", delta: "+42 k params (S)", status: "1.755 (−0.038) · dropped: redundant with c (b+c 1.734)"},
+  {id: "c", name: "q/k/v conv", what: "Primer-style causal depthwise conv (k 3) on q, k, v in every block", delta: "+9 k params (S)", status: "1.740 (−0.053) · KEPT"},
+  {id: "d", name: "S-deep", what: "d 192 × 7 layers instead of d 256 × 4 (same 12·L·d² budget, head width 64)", delta: "−65 k params", status: "1.773 (−0.020) · dropped: marginal, 19% slower"},
+];
+const state = {preset: "S", stem: false, qkv: true};
+const NS = "http://www.w3.org/2000/svg";
+const fmt = n => n.toLocaleString("en-US");
+const fmtM = n => n >= 1e6 ? (n/1e6).toFixed(2) + " M" : (n/1e3).toFixed(1) + " k";
+
+function el(svg, tag, attrs, text) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text !== undefined) e.textContent = text;
+  svg.appendChild(e); return e;
+}
+function defs(svg) {
+  const d = el(svg, "defs", {});
+  const m = document.createElementNS(NS, "marker");
+  Object.entries({id: svg.id + "-ah", viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse"}).forEach(([k, v]) => m.setAttribute(k, v));
+  const p = document.createElementNS(NS, "path"); p.setAttribute("d", "M0,0 L10,5 L0,10 z"); p.setAttribute("class", "arrowhead");
+  m.appendChild(p); d.appendChild(m);
+}
+function node(svg, x, y, w, h, title, shape, cls = "node", shape2) {
+  el(svg, "rect", {x, y, width: w, height: h, rx: 7, class: cls});
+  el(svg, "text", {x: x + 12, y: y + (shape ? 20 : h/2 + 5), class: "t" + (cls === "iface" ? " iface-t" : "")}, title);
+  if (shape) el(svg, "text", {x: x + 12, y: y + 38, class: "mono"}, shape);
+  if (shape2) el(svg, "text", {x: x + 12, y: y + 55, class: "mono"}, shape2);
+}
+function arrow(svg, x1, y1, x2, y2) {
+  el(svg, "path", {d: `M${x1},${y1} L${x2},${y2}`, class: "edge", "marker-end": `url(#${svg.id}-ah)`});
+}
+
+function drawStack(c) {
+  const s = document.getElementById("stack"); s.replaceChildren(); defs(s);
+  const lo = Math.floor(c.L/2), hi = c.L - lo;
+  const emb = state.stem
+    ? ["Conv stem (causal)", `256 × ${STEM_DIM} emb → conv ${STEM_DIM}→${c.d} (k 4)`, "node", 66, `+ depthwise conv (k 4, dil 2): sees 7 bytes`]
+    : ["Byte embedding (tied)", `256 × ${c.d}  →  h: [B, ${c.T}, ${c.d}]`, "node", 50];
+  const head = state.stem
+    ? ["Output head (untied)", `${c.d} → 256  (own weights)`, "node", 50]
+    : ["Output head = embeddingᵀ", `${c.d} → 256  (shared weights)`, "node", 50];
+  const rows = [
+    ["Input bytes", `x: [B, ${c.T}]  uint8, raw UTF-8`, "node", 50],
+    emb,
+    [`Lower blocks 1 … ${lo}`, `${lo} × block  (residual width d = ${c.d})`, "node", 50],
+    ["Mid-stack latent interface", `h_mid: [B, ${c.T}, ${c.d}]  recurrence · memory`, "iface", 50],
+    [`Upper blocks ${lo + 1} … ${c.L}`, `${hi} × block`, "node", 50],
+    ["Final RMSNorm", `gain ${c.d}`, "node", 50],
+    head,
+    ["Logits", `[B, ${c.T}, 256]  optional soft-cap c·tanh(x/c)`, "fxn", 50],
+    ["Loss", "CE (bits/byte) + 1e-4 · lse²  (z-loss)", "node", 50],
+  ];
+  const x = 20, w = 340;
+  let y = 14;
+  rows.forEach(([t, sh, cls, h, sh2], i) => {
+    node(s, x, y, w, h, t, sh, cls, sh2);
+    if (i < rows.length - 1) arrow(s, x + w/2, y + h, x + w/2, y + h + 24);
+    y += h + 28;
+  });
+}
+
+function drawBlock(c) {
+  const s = document.getElementById("block"); s.replaceChildren(); defs(s);
+  const dh = c.d / c.H, f = 4 * c.d, rx = 40, bx = 110, bw = 390;
+  el(s, "path", {d: `M${rx},14 L${rx},748`, class: "resid", "marker-end": `url(#${s.id}-ah)`});
+  el(s, "text", {x: rx + 8, y: 26, class: "mono"}, `residual stream [B, T, ${c.d}]`);
+  const A = [
+    ["RMSNorm", `gain ${c.d}`, "node"],
+    state.qkv
+      ? ["qkv projection + causal conv", `${c.d} → ${3*c.d}, then depthwise conv k 3 per channel`, "node"]
+      : ["qkv projection", `${c.d} → ${3*c.d}  =  3 × ${c.H} heads × ${dh}`, "node"],
+    ["QK-norm + RoPE", `RMSNorm(${dh}) on q and k · rotary positions`, "node"],
+    ["Causal attention", `scores qkᵀ/√${dh}: [B, ${c.H}, T, T] · softmax · ×v`, "fxn"],
+    ["Output projection", `${c.H} × ${dh} → ${c.d}`, "node"],
+  ];
+  const M = [
+    ["RMSNorm", `gain ${c.d}`, "node"],
+    ["Up projection", `${c.d} → ${f}`, "node"],
+    ["ReLU²", `max(0, u)²  on [B, T, ${f}]`, "node"],
+    ["Down projection", `${f} → ${c.d}`, "node"],
+  ];
+  const h = 46, gap = 18;
+  function branch(rows, y0, label) {
+    el(s, "text", {x: bx, y: y0 - 8, class: "mono"}, label);
+    arrow(s, rx, y0 + h/2, bx - 2, y0 + h/2);
+    let y = y0;
+    rows.forEach(([t, sh, cls], i) => {
+      node(s, bx, y, bw, h, t, sh, cls);
+      if (i < rows.length - 1) arrow(s, bx + 40, y + h, bx + 40, y + h + gap);
+      y += h + gap;
+    });
+    const ys = y + 6;
+    el(s, "path", {d: `M${bx + bw/2},${y - gap} L${bx + bw/2},${ys} L${rx + 9},${ys}`, class: "edge", "marker-end": `url(#${s.id}-ah)`});
+    el(s, "circle", {cx: rx, cy: ys, r: 9, class: "plus"});
+    el(s, "text", {x: rx, y: ys + 5, "text-anchor": "middle", class: "t"}, "+");
+    return ys;
+  }
+  const yA = branch(A, 54, "attention sub-layer");
+  branch(M, yA + 46, "MLP sub-layer");
+}
+
+function paramRows(c) {
+  const d = c.d, L = c.L, dh = d / c.H, f = 4 * d;
+  const rows = [];
+  if (state.stem) {
+    rows.push(["Byte embedding", "256 × r", `256 × ${STEM_DIM}`, 256*STEM_DIM, 1, "byte"]);
+    rows.push(["Stem conv (causal, k 4)", "r × d × 4", `${STEM_DIM} × ${d} × 4`, STEM_DIM*d*4, 1, "byte"]);
+    rows.push(["Stem depthwise conv (k 4, dil 2)", "d × 4", `${d} × 4`, d*4, 1, "byte"]);
+    rows.push(["Output head (untied)", "d × 256", `${d} × 256`, 256*d, 1, "byte"]);
+  } else {
+    rows.push(["Byte embedding / tied head", "256 × d", `256 × ${d}`, 256*d, 1, "byte"]);
+  }
+  rows.push(["qkv projection", "d × 3d", `${d} × ${3*d}`, 3*d*d, L, "byte"]);
+  if (state.qkv) rows.push(["q/k/v depthwise conv (k 3)", "3d × 3", `${3*d} × 3`, 9*d, L, "byte"]);
+  rows.push(["Output projection", "d × d", `${d} × ${d}`, d*d, L, "byte"]);
+  rows.push(["MLP up", "d × f", `${d} × ${f}`, d*f, L, "byte"]);
+  rows.push(["MLP down", "f × d", `${f} × ${d}`, f*d, L, "byte"]);
+  rows.push(["RMSNorm gains (2 per block)", "2 × d", `2 × ${d}`, 2*d, L, "byte"]);
+  rows.push(["QK-norm gains", "2 × dₕ", `2 × ${dh}`, 2*dh, L, "byte"]);
+  rows.push(["Final RMSNorm", "d", `${d}`, d, 1, "byte"]);
+  return rows;
+}
+
+function drawTable(c) {
+  const rows = paramRows(c);
+  let html = "<tr><th>Component</th><th>Shape</th><th>This model</th><th>Per copy</th><th>Copies</th><th>Total</th><th>Grid (M4)</th></tr>";
+  let sum = 0;
+  for (const [n, sh, v, per, k, g] of rows) {
+    sum += per * k;
+    html += `<tr><td>${n}</td><td class="s">${sh}</td><td class="s">${v}</td><td class="n">${fmt(per)}</td><td class="n">${k}</td><td class="n">${fmt(per*k)}</td><td><span class="grid-tag">${g}</span></td></tr>`;
+  }
+  html += `<tr><td>Attention scores (activation)</td><td class="s">B × H × T × T</td><td class="s">B × ${c.H} × ${c.T} × ${c.T}</td><td class="n">–</td><td class="n">${c.L}</td><td class="n">–</td><td><span class="grid-tag fx">fixed-point</span></td></tr>`;
+  html += `<tr><td>Logits (activation)</td><td class="s">B × T × 256</td><td class="s">B × ${c.T} × 256</td><td class="n">–</td><td class="n">1</td><td class="n">–</td><td><span class="grid-tag fx">fixed-point</span></td></tr>`;
+  html += `<tr class="tot"><td>Total parameters</td><td></td><td></td><td></td><td></td><td class="n">${fmt(sum)}</td><td></td></tr>`;
+  document.getElementById("ptab").innerHTML = html;
+  return sum;
+}
+
+function drawVariants() {
+  let html = "<tr><th></th><th>Variant</th><th>What changes</th><th>Size vs S</th><th>Result (eval-v1, 2 seeds)</th></tr>";
+  for (const v of VARIANTS) {
+    html += `<tr><td class="s">${v.id}</td><td>${v.name}</td><td style="white-space:normal;min-width:16rem">${v.what}</td><td class="s">${v.delta}</td><td class="s">${v.status}</td></tr>`;
+  }
+  document.getElementById("vtab").innerHTML = html;
+}
+
+function render() {
+  const c = P[state.preset];
+  document.querySelectorAll("[data-p]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.p === state.preset)));
+  document.querySelectorAll("[data-v]").forEach(b => b.setAttribute("aria-pressed", String(state[b.dataset.v])));
+  drawStack(c); drawBlock(c);
+  const total = drawTable(c);
+  document.getElementById("facts").innerHTML =
+    `<span>d <b>${c.d}</b></span><span>layers <b>${c.L}</b></span><span>heads <b>${c.H} × ${c.d / c.H}</b></span><span>MLP <b>${4*c.d}</b></span><span>context <b>${c.T}</b> bytes</span><span>params <b>${fmtM(total)}</b></span>`;
+  try { localStorage.setItem("arch-state", JSON.stringify({...state, v: 2})); } catch (e) {}
+}
+document.querySelectorAll("[data-p]").forEach(b => b.addEventListener("click", () => { state.preset = b.dataset.p; render(); }));
+document.querySelectorAll("[data-v]").forEach(b => b.addEventListener("click", () => { state[b.dataset.v] = !state[b.dataset.v]; render(); }));
+try {
+  const saved = JSON.parse(localStorage.getItem("arch-state") || "null");
+  if (saved && saved.v === 2 && P[saved.preset]) Object.assign(state, saved);
+} catch (e) {}
+drawVariants();
+render();
+</script>
