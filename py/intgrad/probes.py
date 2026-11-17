@@ -121,11 +121,11 @@ def _train_masked(model, make, steps: int, lr: float, wd: float, B: int, device,
     return acc
 
 
-def p2_copy(device="cpu", steps=1500, lr=1e-3, wd=0.1, n=24, seed=0, preset="XS") -> dict:
+def p2_copy(device="cpu", steps=1500, lr=1e-3, wd=0.1, n=24, seed=0, preset="XS", **model_kw) -> dict:
     from intgrad.models.transformer import build
     torch.manual_seed(seed)
     T = 2 * n + 4
-    m = build(preset, T=T).to(device)
+    m = build(preset, T=T, **model_kw).to(device)
     acc = _train_masked(m, lambda B, g: _copy_batch(B, n, T, g), steps, lr, wd, 128, device, seed)
     return {"acc": acc, "pass": acc >= 0.99}
 

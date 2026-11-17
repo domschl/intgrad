@@ -41,3 +41,18 @@ def test_utf8_valid_fraction_allows_truncated_tail_only():
     samples = [ok, ok[:-1], ok[:3] + b"\xff" + ok[3:], b"\xc3"]
     # whole; truncated in the last char (allowed); invalid byte inside; lone lead at end (allowed)
     assert train.utf8_valid_fraction(samples) == 0.75
+
+
+def test_micro_batches_give_the_same_gradient():
+    from intgrad.models.transformer import build
+    torch.manual_seed(0)
+    m = build(d=32, L=2, H=2, T=16)
+    x = torch.randint(0, 256, (8, 16))
+    y = torch.randint(0, 256, (8, 16))
+    m.loss(m(x), y)[0].backward()
+    full = [p.grad.clone() for p in m.parameters()]
+    m.zero_grad()
+    for i in range(0, 8, 2):
+        (m.loss(m(x[i:i + 2]), y[i:i + 2])[0] * 0.25).backward()
+    for a, p in zip(full, m.parameters()):
+        assert torch.allclose(a, p.grad, atol=1e-6)

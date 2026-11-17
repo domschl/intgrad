@@ -283,7 +283,15 @@ saturation is absorbing under the clamp-masked STE.
 
 Acceptance: parity tests green; MLP gap reproduced; probes P1 + P5 pass.
 
-### M3 — Scalable test transformer (fp first, no recurrence)
+### M3 — Scalable test transformer (fp first, no recurrence) ✅
+Done 2026-11-17. Acceptance: P2 and P3 pass at XS and S; P4 32/32 valid
+UTF-8 at all sizes; the ladder is monotone (X10); S beats xz and KN-5;
+throughput recorded (S 477 kB/s compiled, above the 300 kB/s estimate).
+Outcomes: Lion β (0.95, 0.98), lr 3e-3, wd 3 (X7, X8, X11); q/k/v causal
+depthwise conv kept, conv stem and deeper/narrower dropped (X9);
+`torch.compile` and micro-batching in the trainer; mid-stack latent
+hook (`mid_hook`). Inputs for M4: logit and attention-score ranges
+(X10), Lion's weight bound 1/wd, C oracle betas (X7).
 Decoder-only, pre-norm (RMSNorm), causal self-attention, RoPE, MLP with
 ReLU² (cheap as a LUT; SwiGLU is an ablation), tied 256 × d byte
 embedding / output head, no biases. One config scales it:
@@ -632,6 +640,52 @@ sources; wiki-de (most multi-byte characters) gains only slightly more.
 `torch.compile` is now the default for transformer training (+53% on S;
 q/k/v-conv overhead 35% → 15%). The conv stem stays in the code as a
 candidate front end for patching/hourglass designs (plan 002).
+
+**X10 — Scaling ladder (M3 acceptance, 2026-11-17).** Chosen architecture
+(q/k/v conv, tied embedding), fp, 300 MB per size (9,155 steps × 32 kB),
+Lion lr 3e-3 wd 3 β (0.95, 0.98), warmup 300, cosine, compiled; L with
+micro-batches of 8 (fp32 attention does not fit otherwise). Seed 42.
+`configs/m3-ladder.toml`.
+
+| preset | params | eval-v1 bpb | books / wiki-en / wiki-de / defs | train speed | P4 UTF-8 valid |
+|---|---|---|---|---|---|
+| XS | 0.43 M | 1.946 ± 0.010 | 1.918 / 1.914 / 2.061 / 1.898 | 1,673 kB/s | 32/32 |
+| S | 3.2 M | 1.668 ± 0.009 | 1.674 / 1.621 / 1.700 / 1.611 | 477 kB/s | 32/32 |
+| M | 10.7 M | 1.580 ± 0.008 | 1.594 / 1.523 / 1.595 / 1.530 | 166 kB/s | 32/32 |
+| L | 25.3 M | **1.536 ± 0.008** | 1.556 / 1.477 / 1.541 / 1.480 | 85 kB/s | 32/32 |
+
+Monotone in size; S beats KN-5 (2.415) by 0.75 and xz (2.90) by 1.2 bpb.
+300 MB is far below compute-optimal for M/L (≈ 30 and 12 bytes per
+parameter), so the gaps between the larger sizes understate their
+potential. P2 copy and P3 MQAR pass at XS and S with this architecture
+(100% each).
+
+Telemetry inputs for M4 (step 9,155):
+- **logits** exceed the fixed-point clamp ±12.7 in 51% (XS) → 73% (L)
+  of entries, max |logit| 47–60;
+- **attention scores** clamp heavily at L only: 46% (layer 4), 43%
+  (layer 6), 31% (layer 1), vs ≤ 1% at M. QK-norm gains are vectors,
+  so they get no weight decay, and Lion grows them freely: sharper
+  attention, harmless in fp, but it would clamp on the score grid;
+- everything else stays inside the byte window. Weights are bounded by
+  Lion's equilibrium |w| ≤ 1/wd = 0.33, i.e. only the lower ~6.4
+  octaves of the global weight grid are used.
+
+**X11 — Is wd 3 a short-horizon artifact? (user question, 2026-11-17).**
+In fp nothing is clamped, so the strong decay cannot be a quantization
+artifact. Mechanism (X8 telemetry): max |w| = 1/wd exactly (Lion's
+sign-update equilibrium); with wd 0.1 the weights grow ×55 and the
+residual stream reaches p99 ≈ 8,000. The decay is magnitude control, not
+classical regularization. Check at the ladder horizon (XS, 300 MB, seed 42):
+
+| lr, wd | 3e-3, 1 | **3e-3, 3** | 3e-3, 10 | 3e-4, 0.1 |
+|---|---|---|---|---|
+| bpb | 1.948 | **1.946** | 1.985 | 2.091 |
+
+Verdict: at the longer horizon the optimum widens toward weaker decay (wd
+1 ≈ 3; 10 is now too strong). Bounding magnitudes via a low lr instead
+is clearly worse. We keep wd 3: as good as 1, with a tighter weight bound
+(0.33 vs 1.0) for M4.
 
 ## 9. Risks
 

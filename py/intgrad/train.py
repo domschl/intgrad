@@ -40,6 +40,7 @@ DEFAULTS = {
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
               "telemetry_every": 0, "samples": 0, "sample_len": 1024,
               "compile": False, "final_eval": True, "betas": [0.9, 0.99],
+              "micro_batch": 0,  # >0: gradient accumulation over micro-batches
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
 }
@@ -188,14 +189,22 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             g["lr"] = lr
         b = batcher.next()
         x = torch.from_numpy(b.x).to(dev, non_blocking=True)
+        opt.zero_grad(set_to_none=True)
         if is_mlp:
             y = torch.from_numpy(b.y[:, -1].astype("int64")).to(dev)
             loss = ce = F.cross_entropy(fwd(x), y)
+            loss.backward()
         else:
             y = torch.from_numpy(b.y).to(dev, non_blocking=True)
-            loss, ce = model.loss(fwd(x), y)
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
+            mb = t["micro_batch"] or len(x)            # gradient accumulation
+            if len(x) % mb:
+                raise ValueError("train.batch must be a multiple of train.micro_batch")
+            loss = ce = 0.0
+            for i in range(0, len(x), mb):
+                li, ci = model.loss(fwd(x[i:i + mb]), y[i:i + mb])
+                (li * (mb / len(x))).backward()        # mean over the full batch
+                loss = loss + li.detach() * (mb / len(x))
+                ce = ce + ci.detach() * (mb / len(x))
         opt.step()
         if step % t["log_every"] == 0 or step == end - 1:
             el = time.time() - t0
