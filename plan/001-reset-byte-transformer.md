@@ -510,8 +510,11 @@ they reintroduce tokenizer-like decisions. The only structural rule is
 "Character complete" is decided from past bytes only: the lead byte
 announces the length. Stray continuation bytes (a window starting
 mid-character, broken text) count as 1-byte characters. The patch vector
-is the encoder state of the patch's last byte, and byte attention is
-masked to the patch segment. Causality is tested at every split point and
+is built from the last k encoder states up to the patch end, and each later
+byte gets its own upsample vector by offset from that end (clipped at
+k−1). So the path has the same width as fixed patching and is identical to
+it on ASCII (tested). Byte attention is masked to the patch segment.
+**Default after X24: `patching = "utf8"`.** Causality is tested at every split point and
 mutation-checked: a decoder that sees a patch one byte early fails.
 Learned or entropy boundaries (BLT/H-Net) remain later options, still
 constrained to character ends.
@@ -1153,6 +1156,40 @@ is only 75 M patches for 90 M parameters (data-starved), and lr 3e-3 was
 tuned at S. Compared with flat M (1.580, 30 min) the gap is still 0.27
 bpb. The open levers are patch boundaries (round 5), training length,
 and lr at large width.
+
+**X24 — M6 round 5: language-agnostic patch boundaries (2026-11-18).**
+M core, k 4, patch-local byte path, fp, seed 42, 300 MB.
+
+| patching | bpb | wiki-en | wiki-de | books | time | peak VRAM |
+|---|---|---|---|---|---|---|
+| fixed 4-byte grid | 1.916 | 1.890 | 2.017 | 1.884 | 13.1 min | 3.7 GB |
+| utf8 (grid snapped to char ends) | 1.894 | 1.863 | 2.000 | 1.864 | 25.2 min | 4.0 GB |
+| chars (4 characters) | **1.890** | 1.862 | 1.994 | 1.858 | 25.1 min | 4.0 GB |
+| utf8, narrow (bug, see below) | 1.973 | 1.954 | 2.115 | 1.927 | 24.9 min | 4.0 GB |
+
+- **The first run was confounded.** The variable-patch path passed only
+  the last byte state to the core (d_b instead of k·d_b) and gave one
+  vector to every byte of the next patch. It was +0.06 on every source,
+  English included. Fixed in `59720b3`; the narrow runs are kept as
+  `*-narrow`.
+- **After the fix, not splitting characters helps by 0.022–0.026 bpb.**
+  The gain is about uniform across sources: German −0.018/−0.024,
+  English −0.027, books −0.020/−0.026. English wiki is not pure ASCII
+  (typographic quotes, dashes, names), so whole characters per patch help
+  there too. This is a single seed: about 2 eval-se and paired on the
+  same eval set, but seed noise is unmeasured.
+- **utf8 and chars are equal within noise.** utf8 is the default: its
+  patch length in bytes is bounded (≤ k+3), so compute per byte is
+  predictable. chars puts 12 bytes into a CJK patch and leaves global
+  slots empty on multi-byte text.
+- **Cost:** 2× wall time from the dense [B,1,T,T] segment mask (explicit
+  attention instead of fused SDPA). Peak VRAM +0.3 GB. Quality is not
+  affected; chunked segment attention is the fix before M7 scales up.
+- M6 standing: hourglass L-k4 is 1.847 (fixed); the utf8 gain applies on
+  top. The gap to flat (L 1.536) is about 0.3. The training curves show
+  the hourglass still closing the gap at the end of the schedule, with a
+  larger late cosine drop than flat (0.08–0.09 vs 0.067). The next
+  levers are lr for the hourglass core and a longer training run.
 
 ## 9. Risks
 
