@@ -1267,6 +1267,36 @@ wd 3, otherwise as X25.
 - **Round 9:** the best setting trained 4× longer (36,620 steps, 1.2 GB,
   no data repetition: the corpus is about 20 GB), then flat L at lr 1.5e-3.
 
+**X28 — M6 round 9: 4× training and a fair flat L (2026-11-18).**
+
+| run | data | bpb | wiki-en | wiki-de | books | wall time |
+|---|---|---|---|---|---|---|
+| hourglass L-utf8, lr 7.5e-4 | 300 MB | 1.765 | 1.720 | 1.833 | 1.754 | 23.5 min |
+| hourglass L-utf8, lr 7.5e-4 | 1.2 GB | 1.644 | 1.588 | 1.693 | 1.646 | 93.4 min |
+| flat L, lr 3e-3 (M3) | 300 MB | 1.536 | 1.477 | 1.541 | 1.556 | 58.8 min |
+| flat L, lr 1.5e-3 | 300 MB | **1.525** | 1.466 | 1.531 | 1.546 | 58.6 min |
+
+- **4× data buys the hourglass 0.121 bpb** (about 0.06 per doubling). The
+  4× curve flattens between steps 12k and 20k, and most of the gain comes
+  in the cosine tail. At this length the lr is probably again too high
+  in the middle of the schedule.
+- **Flat L gains a little from a lower lr** (−0.011). The fair gap at equal
+  data is 0.24 bpb.
+- **At equal wall time the gap is still about 0.16** (hourglass at about
+  2.5× data, interpolated: about 1.685, against flat L at 1.525). At 0.06 per
+  doubling, the hourglass would need about 16× the data (about 6 h) to reach
+  flat L at 300 MB. At this scale flat is ahead per byte and per GPU-hour.
+- **VRAM, measured correctly:** in training alone the hourglass L needs
+  3.8 GiB at 76 ms/step, against 5.9 GiB at 174 ms/step for flat L
+  (compiled, bf16, the same 32 KiB per step). The logged 7.3 GB was the eval
+  peak: eval batches are sized by core attention, so the hourglass
+  evaluates 4× the bytes per batch. Training and eval peaks are now
+  logged separately.
+- **M6 conclusion for this scale:** the hourglass delivers what it promised
+  on cost (2.3× faster, −35% VRAM) but not on quality per compute. It
+  becomes the better choice only where VRAM binds, i.e. cores well above L.
+  That is the open question for the M7 base.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
