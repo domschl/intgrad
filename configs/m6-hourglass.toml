@@ -6,6 +6,10 @@ name = "m6-hg"
 kind = "transformer"
 arch = "hourglass"
 qkv_conv = 3
+byte_mix = "patch"          # patch-local byte path (X22)
+patching = "utf8"           # never split a UTF-8 character (X24)
+k = 4
+T = 2048
 
 [quant]
 enabled = false
