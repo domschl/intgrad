@@ -71,7 +71,10 @@ class Hourglass(ByteLM):
         """T: byte context (a multiple of k); the global stack sees T/k patches.
         byte_mix "conv": ByteBlocks (causal depthwise conv + MLP);
         "attn": transformer Blocks with sliding-window attention over the
-        last byte_window bytes (heads of width byte_dh), as in SpaceByte."""
+        last byte_window bytes (heads of width byte_dh), as in SpaceByte;
+        "patch": transformer Blocks whose attention stays inside the
+        current patch (MEGABYTE-style): everything beyond the patch must go
+        through the global core (X21: the wider byte paths short-cut it)."""
         super().__init__()
         if T % k:
             raise ValueError(f"T={T} must be a multiple of k={k}")
@@ -80,13 +83,15 @@ class Hourglass(ByteLM):
         self.qat = qat = QAT(**qat) if isinstance(qat, dict) else (qat or QAT())
         kernel = kernel or max(4, k)
         n_res = enc + dec
-        if byte_mix not in ("conv", "attn"):
+        if byte_mix not in ("conv", "attn", "patch"):
             raise ValueError(f"byte_mix {byte_mix!r}")
         self.byte_mix, self.byte_H = byte_mix, max(1, d_b // byte_dh)
 
         def byte_block():
             if byte_mix == "conv":
                 return ByteBlock(d_b, kernel, n_res, qat)
+            if byte_mix == "patch":                 # no q/k/v conv: it would cross patches
+                return Block(d_b, self.byte_H, n_res, qk_norm, 0, qat, patch=k)
             return Block(d_b, self.byte_H, n_res, qk_norm, qkv_conv, qat, window=byte_window)
 
         self.emb = nn.Embedding(256, d_b)

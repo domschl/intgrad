@@ -174,12 +174,14 @@ class QAT:
 
 class Block(nn.Module):
     def __init__(self, d: int, H: int, L: int, qk_norm: bool = True,
-                 qkv_conv: int = 0, qat: QAT = QAT(), window: int = 0):
+                 qkv_conv: int = 0, qat: QAT = QAT(), window: int = 0, patch: int = 0):
         """window > 0: sliding-window causal attention (each position sees
-        the last `window` positions, itself included); 0 = full causal."""
+        the last `window` positions, itself included); 0 = full causal.
+        patch > 0: causal attention only inside aligned blocks of `patch`
+        positions (MEGABYTE-style local model; O(T * patch) scores)."""
         super().__init__()
         self.qat = qat
-        self.window = window
+        self.window, self.patch = window, patch
         self.qs = _sites("n1 q k v attn n2 up mlp", qat.acts)
         self.rs = _sites("r1 r2", qat.resid == "q8")
         self.H, self.dh = H, d // H
@@ -203,6 +205,14 @@ class Block(nn.Module):
     def attend(self, q, k, v):
         """Causal attention; explicit when scores or probabilities are
         quantized (SDPA never materializes them)."""
+        if self.patch:
+            B, H, T, dh = q.shape
+            p = self.patch
+            blk = lambda t: t.reshape(B, H, T // p, p, dh)
+            return self._attend(blk(q), blk(k), blk(v)).reshape(B, H, T, dh)
+        return self._attend(q, k, v)
+
+    def _attend(self, q, k, v):
         qat = self.qat
         T = q.shape[-2]
         causal = None

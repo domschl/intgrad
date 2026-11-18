@@ -13,7 +13,7 @@ def tiny(k=4, **kw):
     return Hourglass(d=32, L=2, H=2, T=32, k=k, d_b=16, qkv_conv=3, **kw)
 
 
-@pytest.mark.parametrize("mix", ["conv", "attn"])
+@pytest.mark.parametrize("mix", ["conv", "attn", "patch"])
 @pytest.mark.parametrize("k", [1, 2, 4])
 @pytest.mark.parametrize("t", [0, 3, 4, 7, 13, 30])
 def test_causal_at_every_offset(k, t, mix):
@@ -117,3 +117,16 @@ def test_sliding_window_limits_the_byte_path():
     with torch.no_grad():
         d = (blk(x, rope_cache(32, 8, "cpu")) - blk(x2, rope_cache(32, 8, "cpu"))).abs().amax(-1)[0]
     assert d[:5].max() == 0 and d[5:9].min() > 0 and d[9:].max() == 0
+
+
+def test_patch_local_byte_path_forces_the_core():
+    """byte_mix "patch": with the global path zeroed, a byte influences
+    nothing outside its own patch (all cross-patch information goes
+    through the core)."""
+    m = tiny(4, byte_mix="patch", byte_dh=8)
+    m.up.weight.data.zero_()
+    x = torch.randint(0, 256, (1, 32))
+    x2 = x.clone(); x2[0, 9] = (x2[0, 9] + 1) % 256       # patch 2 = bytes 8..11
+    with torch.no_grad():
+        d = (m(x) - m(x2)).abs().amax(-1)[0]
+    assert d[:9].max() == 0 and d[9:12].min() > 0 and d[12:].max() == 0

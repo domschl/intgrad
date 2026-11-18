@@ -1056,6 +1056,47 @@ Round 2 tests both explanations at S: byte blocks with sliding-window
 attention (window 64, `model.byte_mix = "attn"`) vs a deeper core (L 8),
 and both together.
 
+**X21 — M6 round 2: byte attention vs deeper core; the byte-path
+shortcut (2026-11-18).** S, fp, seed 42, as X20.
+
+| variant | bpb |
+|---|---|
+| S-k4, conv byte path (X20) | 1.896 |
+| S-k4, sliding-window byte attention (window 64) | 1.910 |
+| S-k4, conv, core L 8 | 1.929 |
+| S-k4, attention + L 8 | 1.911 |
+| S-k2, conv (X20) | 1.766 |
+| S-k2, attention | 1.927 |
+
+Nothing helped, and a deeper core was worse. Ablation
+(`runs/m6_ablate.py`, 128 val chunks): zero the upsampled global vector.
+
+| model | bpb | global off | rms(up) / rms(byte stream) |
+|---|---|---|---|
+| S-k2 conv | 1.784 | 2.761 (+0.98) | 0.18 / 0.34 |
+| S-k4 conv | 1.913 | 2.536 (+0.62) | 0.10 / 0.32 |
+| L-k4 conv | 1.838 | 2.415 (+0.58) | 0.13 / 0.41 |
+| S-k4 attn | 1.929 | 2.066 (+0.14) | 0.02 / 0.13 |
+
+Diagnosis: **the byte path short-cuts the core.** Byte layers that see
+across patch boundaries (convs ≈ 7 bytes, window attention 64 bytes)
+learn local statistics fast, and the model leans on them. The stronger
+the byte path, the less the core is used (attention: +0.14, with the
+loss flat over the patch offset). That runs against the cognitive-core
+goal. **Fix (round 3): a patch-local byte path**, `byte_mix = "patch"`,
+MEGABYTE-style:
+- encoder attention stays inside each patch (a patch vector is a learned
+  token of its own k bytes);
+- the decoder sees the previous patch's core vector plus the bytes so far
+  in its own patch;
+- all cross-patch information must pass through the core (tested);
+- attention costs O(T·k), which also realizes the VRAM saving.
+
+**VRAM (user, 2026-11-18)** becomes a third M6 axis next to bpb and
+time. 12 GB is the hard limit. Core activations shrink by k and
+attention scores by k², which is headroom for a larger core and for plan
+002 state. ig-train now logs `peak_gib` with the final eval.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).

@@ -266,6 +266,8 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
                 "batcher": batcher.state_dict(), "sr_gen": sr_gen.get_state(),
                 "step": end}, run_dir / "ckpt.pt")
     final = evaluate(model, ev, dev) if t.get("final_eval", True) else {"bpb": float("nan"), "se": 0.0}
+    if dev.type == "cuda":                     # peak training VRAM (before sampling)
+        final["peak_gib"] = round(torch.cuda.max_memory_allocated(dev) / 2**30, 2)
     log.write(json.dumps({"step": end, "eval": final, "final": end == t["steps"]}) + "\n")
     if t["samples"] and not is_mlp:
         g = torch.Generator(device=dev).manual_seed(t["seed"])
