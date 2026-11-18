@@ -72,11 +72,16 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
         from intgrad.models.mlp import ByteMLP
         return ByteMLP(m["ctx"], m["hidden"], qc, generator=gen)
     if m["kind"] == "transformer":
-        from intgrad.models import transformer
-        kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
-                                "stem", "stem_dim", "qkv_conv", "logit_quant") if k in m}
+        from intgrad.models import hourglass, transformer
         qat = transformer.QAT(acts=qc.acts, resid=qc.resid, softmax=qc.softmax, probs=qc.probs)
-        model = transformer.build(m.get("preset"), qat=qat, **kw)
+        if m.get("arch", "flat") == "hourglass":     # M6
+            kw = {k: m[k] for k in ("d", "L", "H", "T", "k", "d_b", "enc", "dec", "kernel",
+                                    "zloss", "qk_norm", "qkv_conv") if k in m}
+            model = hourglass.build(m.get("preset"), qat=qat, **kw)
+        else:
+            kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
+                                    "stem", "stem_dim", "qkv_conv", "logit_quant") if k in m}
+            model = transformer.build(m.get("preset"), qat=qat, **kw)
         for p in model.parameters():          # weights start on their grid
             qc.project_(p)
         return model

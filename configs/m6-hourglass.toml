@@ -1,0 +1,24 @@
+# M6 hourglass (plan/001 §5 M6): same byte budget per step (32 KB) and total
+# (300 MB, 9155 steps) as the m3-ladder; set model.preset, model.k, model.T, train.batch
+name = "m6-hg"
+
+[model]
+kind = "transformer"
+arch = "hourglass"
+qkv_conv = 3
+
+[quant]
+enabled = false
+
+[train]
+steps = 9155
+warmup = 300
+lr = 3e-3
+wd = 3.0
+betas = [0.95, 0.98]
+log_every = 200
+telemetry_every = 2000
+eval_every = 2000
+samples = 32
+sample_len = 1024
+compile = true

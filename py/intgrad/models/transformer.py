@@ -251,7 +251,84 @@ class Block(nn.Module):
         return x
 
 
-class ByteTransformer(nn.Module):
+class ByteLM(nn.Module):
+    """Shared by every byte LM here: [B, T] bytes -> logits [B, T, 256].
+    Subclasses set T, H, qat, zloss and implement forward(x, tap, mid_hook)."""
+
+    def loss(self, logits: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(total, ce): ce in nats per byte; total adds zloss * lse²."""
+        lg = logits.reshape(-1, 256)
+        ce = F.cross_entropy(lg, y.reshape(-1).long())
+        if self.zloss:
+            return ce + self.zloss * torch.logsumexp(lg, -1).square().mean(), ce
+        return ce, ce
+
+    def max_batch(self, cap: int = 64) -> int:
+        """Inference batch: explicit attention keeps <= 2^27 scores per tensor."""
+        b = cap
+        if self.qat.explicit_attn:
+            while b > 1 and b * self.attn_elems() > 1 << 27:
+                b //= 2
+        return b
+
+    def attn_elems(self) -> int:
+        """Attention scores per sequence and layer (H x Tq x Tk)."""
+        return self.H * self.T * self.T
+
+    @torch.no_grad()
+    def chunk_bits(self, chunks: torch.Tensor, batch: int = 0) -> torch.Tensor:
+        """Bits for chunks[:, 1:] (eval-v1 protocol). Sliding windows with
+        stride T/2: each target is scored once, in the earliest window that
+        contains it, so it sees between T/2 and T bytes of context (all of
+        its in-chunk context if it is within the first window)."""
+        N, Lc = chunks.shape
+        T, stride = self.T, self.T // 2
+        batch = batch or self.max_batch()
+        n_in = Lc - 1                                       # inputs 0..L-2
+        if n_in <= T:
+            starts = [0]
+        else:
+            starts = list(range(0, n_in - T + 1, stride))
+            if starts[-1] + T < n_in:
+                starts.append(n_in - T)
+        out = torch.empty(N, Lc - 1, device=chunks.device)
+        covered = 0
+        for s in starts:
+            w = min(T, n_in - s)
+            lo = max(covered, s)                            # first new target - 1
+            for b in range(0, N, batch):
+                xb = chunks[b:b + batch, s:s + w]
+                yb = chunks[b:b + batch, s + 1:s + w + 1].long()
+                lg = self(xb)
+                ce = F.cross_entropy(lg.reshape(-1, 256), yb.reshape(-1),
+                                     reduction="none").view(yb.shape)
+                out[b:b + batch, lo:s + w] = ce[:, lo - s:] / math.log(2)
+            covered = s + w
+        return out
+
+    @torch.no_grad()
+    def sample(self, prompt: torch.Tensor, n: int, temp: float = 0.8,
+               generator: torch.Generator | None = None) -> torch.Tensor:
+        """prompt [B, P] bytes -> [B, n] sampled continuation bytes
+        (in batches of max_batch(), one shared generator)."""
+        mb = self.max_batch()
+        if len(prompt) > mb:
+            return torch.cat([self.sample(prompt[i:i + mb], n, temp, generator)
+                              for i in range(0, len(prompt), mb)])
+        was = self.training
+        self.eval()                       # frozen quantization scales
+        x = prompt.long()
+        out = []
+        for _ in range(n):
+            lg = self(x[:, -self.T:])[:, -1] / temp
+            nxt = torch.multinomial(torch.softmax(lg, -1), 1, generator=generator)
+            out.append(nxt)
+            x = torch.cat([x, nxt], 1)
+        self.train(was)
+        return torch.cat(out, 1).to(torch.uint8)
+
+
+class ByteTransformer(ByteLM):
     def __init__(self, d: int, L: int, H: int, T: int, zloss: float = 1e-4,
                  softcap: float = 0.0, qk_norm: bool = True,
                  stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0,
@@ -341,74 +418,6 @@ class ByteTransformer(nn.Module):
             for name, p in self.named_parameters():
                 tap(f"w.{name}", p)
         return logits
-
-    def loss(self, logits: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """(total, ce): ce in nats per byte; total adds zloss * lse²."""
-        lg = logits.reshape(-1, 256)
-        ce = F.cross_entropy(lg, y.reshape(-1).long())
-        if self.zloss:
-            return ce + self.zloss * torch.logsumexp(lg, -1).square().mean(), ce
-        return ce, ce
-
-    def max_batch(self, cap: int = 64) -> int:
-        """Inference batch: explicit attention keeps <= 2^27 scores per tensor."""
-        b = cap
-        if self.qat.explicit_attn:
-            while b > 1 and b * self.H * self.T * self.T > 1 << 27:
-                b //= 2
-        return b
-
-    @torch.no_grad()
-    def chunk_bits(self, chunks: torch.Tensor, batch: int = 0) -> torch.Tensor:
-        """Bits for chunks[:, 1:] (eval-v1 protocol). Sliding windows with
-        stride T/2: each target is scored once, in the earliest window that
-        contains it, so it sees between T/2 and T bytes of context (all of
-        its in-chunk context if it is within the first window)."""
-        N, Lc = chunks.shape
-        T, stride = self.T, self.T // 2
-        batch = batch or self.max_batch()
-        n_in = Lc - 1                                       # inputs 0..L-2
-        if n_in <= T:
-            starts = [0]
-        else:
-            starts = list(range(0, n_in - T + 1, stride))
-            if starts[-1] + T < n_in:
-                starts.append(n_in - T)
-        out = torch.empty(N, Lc - 1, device=chunks.device)
-        covered = 0
-        for s in starts:
-            w = min(T, n_in - s)
-            lo = max(covered, s)                            # first new target - 1
-            for b in range(0, N, batch):
-                xb = chunks[b:b + batch, s:s + w]
-                yb = chunks[b:b + batch, s + 1:s + w + 1].long()
-                lg = self(xb)
-                ce = F.cross_entropy(lg.reshape(-1, 256), yb.reshape(-1),
-                                     reduction="none").view(yb.shape)
-                out[b:b + batch, lo:s + w] = ce[:, lo - s:] / math.log(2)
-            covered = s + w
-        return out
-
-    @torch.no_grad()
-    def sample(self, prompt: torch.Tensor, n: int, temp: float = 0.8,
-               generator: torch.Generator | None = None) -> torch.Tensor:
-        """prompt [B, P] bytes -> [B, n] sampled continuation bytes
-        (in batches of max_batch(), one shared generator)."""
-        mb = self.max_batch()
-        if len(prompt) > mb:
-            return torch.cat([self.sample(prompt[i:i + mb], n, temp, generator)
-                              for i in range(0, len(prompt), mb)])
-        was = self.training
-        self.eval()                       # frozen quantization scales
-        x = prompt.long()
-        out = []
-        for _ in range(n):
-            lg = self(x[:, -self.T:])[:, -1] / temp
-            nxt = torch.multinomial(torch.softmax(lg, -1), 1, generator=generator)
-            out.append(nxt)
-            x = torch.cat([x, nxt], 1)
-        self.train(was)
-        return torch.cat(out, 1).to(torch.uint8)
 
 
 def build(preset: str | None = None, **kw) -> ByteTransformer:

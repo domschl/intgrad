@@ -96,13 +96,19 @@ def _recall_batch(B: int, pairs: int, T: int, g: torch.Generator):
     return seq[:, :-1], seq[:, 1:], mask
 
 
-def _tf(preset, T, qc: QuantConfig | None, device, **model_kw):
-    """Probe transformer; qc (optional) quantizes it like ig-train does:
-    weights via Lion master codes (qc.enabled), forward sites via qc.acts…"""
-    from intgrad.models.transformer import QAT, build
+def _tf(preset, T, qc: QuantConfig | None, device, arch: str = "flat", **model_kw):
+    """Probe model; qc (optional) quantizes it like ig-train does: weights
+    via Lion master codes (qc.enabled), forward sites via qc.acts…
+    arch "hourglass" (M6): model_kw may set k, d_b, enc, dec; T is rounded
+    up to a multiple of k (shorter inputs are padded by the model)."""
+    from intgrad.models import hourglass, transformer
     qc = qc or QuantConfig(enabled=False)
-    m = build(preset, T=T, qat=QAT(acts=qc.acts, resid=qc.resid, softmax=qc.softmax,
-                                   probs=qc.probs), **model_kw)
+    qat = transformer.QAT(acts=qc.acts, resid=qc.resid, softmax=qc.softmax, probs=qc.probs)
+    if arch == "hourglass":
+        k = model_kw.get("k", 4)
+        m = hourglass.build(preset, T=-(-T // k) * k, qat=qat, **model_kw)
+    else:
+        m = transformer.build(preset, T=T, qat=qat, **model_kw)
     for p in m.parameters():
         qc.project_(p)
     return m.to(device)

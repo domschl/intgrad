@@ -458,7 +458,46 @@ d, the target numerics) and checks stability at L.
 
 Estimated GPU time ≈ 6–7 h.
 
-### M6 — Recurrence readiness (hand-off to plan 002)
+### M6 — Hourglass: sequence compression before the transformer (user proposal, 2026-11-18)
+Idea: a byte-level encoder compresses the stream by k before the main
+transformer; a byte-level decoder expands it again before the logits.
+The core then reasons over syllable-sized units, and its compute per byte
+drops: attention by ~k², the rest by ~k, or the same compute buys a
+larger core. The mid-stack latent, the interface for plan 002, becomes
+patch-level.
+
+Prior work: Hourglass (Nawrot et al. 2021), CANINE (Clark et al.
+2021), MEGABYTE (Yu et al. 2023), SpaceByte (Slagle 2024), BLT (Pagnoni
+et al. 2024: entropy-based patches), H-Net (Hwang, Wang, Gu 2025:
+chunking learned end to end).
+
+Design (`py/intgrad/models/hourglass.py`):
+- emb (256 × d_b) → 2 byte blocks (causal depthwise conv k ≥ max(4, k) +
+  ReLU² MLP) → concatenate k bytes → Linear(k·d_b → d) → global Blocks
+  (unchanged: RoPE, QK-norm, q/k/v conv, QAT sites).
+- Then Linear(d → k·d_b), **shifted right by k−1 bytes**, so patch j
+  only reaches positions ≥ jk+k−1. This is mutation-checked: without the
+  shift, the causality tests fail.
+- Then + the encoder output (byte skip) → 2 byte blocks → tied head.
+- The decoder is autoregressive per byte: bytes inside the current patch
+  come through the skip and the causal convs, and only completed patches
+  through the global path.
+
+Comparison: the same 32 KB per step and 300 MB as the m3-ladder (fp), so
+bpb on eval-v1 sits directly against the flat models. The axis that
+matters is **bpb vs training time**. The context is T = 2048 bytes for
+k = 4 (eval-v1 chunks are 2048 bytes, so longer T cannot pay off there).
+
+Rounds:
+1. S-k2, S-k4, M-k4, L-k4, fp.
+2. If it pays off: probes, especially P3 MQAR (recall must survive the
+   compression), and a quantization re-check of the new parts.
+3. Then patch boundaries at word / UTF-8 boundaries (SpaceByte-style).
+
+Learned chunking (H-Net) stays a later research item. The choice made
+here is the architecture M7 measures and plan 002 builds on.
+
+### M7 — Recurrence readiness (hand-off to plan 002)
 Using the sequential batcher, measure the non-recurrent model's
 **position curve** and **cross-window loss**: the bpb of the first 64 bytes
 of each window when the preceding window is in the same doc, vs a cold
@@ -701,7 +740,7 @@ slower: dropped, so the current widths stay. The gains are similar across
 sources; wiki-de (most multi-byte characters) gains only slightly more.
 `torch.compile` is now the default for transformer training (+53% on S;
 q/k/v-conv overhead 35% → 15%). The conv stem stays in the code as a
-candidate front end for patching/hourglass designs (plan 002).
+candidate front end for patching/hourglass designs (M6).
 
 **X10 — Scaling ladder (M3 acceptance, 2026-11-17).** Chosen architecture
 (q/k/v conv, tied embedding), fp, 300 MB per size (9,155 steps × 32 kB),
