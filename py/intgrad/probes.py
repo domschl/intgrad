@@ -96,11 +96,23 @@ def _recall_batch(B: int, pairs: int, T: int, g: torch.Generator):
     return seq[:, :-1], seq[:, 1:], mask
 
 
+def _tf(preset, T, qc: QuantConfig | None, device, **model_kw):
+    """Probe transformer; qc (optional) quantizes it like ig-train does:
+    weights via Lion master codes (qc.enabled), forward sites via qc.acts…"""
+    from intgrad.models.transformer import QAT, build
+    qc = qc or QuantConfig(enabled=False)
+    m = build(preset, T=T, qat=QAT(acts=qc.acts, resid=qc.resid, softmax=qc.softmax,
+                                   probs=qc.probs), **model_kw)
+    for p in m.parameters():
+        qc.project_(p)
+    return m.to(device)
+
+
 def _train_masked(model, make, steps: int, lr: float, wd: float, B: int, device, seed: int,
-                  betas=(0.9, 0.99)):
+                  betas=(0.9, 0.99), qc: QuantConfig | None = None):
     from intgrad.train import param_groups
     g = torch.Generator().manual_seed(seed)
-    qc = QuantConfig(enabled=False)
+    qc = qc or QuantConfig(enabled=False)
     opt = Lion(param_groups(model, wd), lr=lr, wd=wd, qc=qc, betas=betas)
     warm = max(1, steps // 10)
     for s in range(steps):
@@ -115,18 +127,20 @@ def _train_masked(model, make, steps: int, lr: float, wd: float, B: int, device,
         loss.backward()
         opt.step()
     g_test = torch.Generator().manual_seed(seed + 999)
+    model.eval()                                     # frozen quantization scales
     with torch.no_grad():
         x, y, mask = (t.to(device) for t in make(1024, g_test))
         acc = (model(x).argmax(-1)[mask] == y[mask].long()).float().mean().item()
     return acc
 
 
-def p2_copy(device="cpu", steps=1500, lr=1e-3, wd=0.1, n=24, seed=0, preset="XS", **model_kw) -> dict:
-    from intgrad.models.transformer import build
+def p2_copy(device="cpu", steps=1500, lr=1e-3, wd=0.1, n=24, seed=0, preset="XS",
+            qc: QuantConfig | None = None, **model_kw) -> dict:
     torch.manual_seed(seed)
     T = 2 * n + 4
-    m = build(preset, T=T, **model_kw).to(device)
-    acc = _train_masked(m, lambda B, g: _copy_batch(B, n, T, g), steps, lr, wd, 128, device, seed)
+    m = _tf(preset, T, qc, device, **model_kw)
+    acc = _train_masked(m, lambda B, g: _copy_batch(B, n, T, g), steps, lr, wd, 128, device, seed,
+                        qc=qc)
     return {"acc": acc, "pass": acc >= 0.99}
 
 
@@ -148,30 +162,30 @@ def _mqar_batch(B: int, pairs: int, T: int, g: torch.Generator):
 
 
 def p3_recall(device="cpu", steps=5000, lr=1e-4, wd=0.1, pairs=8, seed=0, preset="XS",
-              batch=512, betas=(0.95, 0.98), **model_kw) -> dict:
+              batch=512, betas=(0.95, 0.98), qc: QuantConfig | None = None, **model_kw) -> dict:
     """P3 = MQAR. The single-query variant (_recall_batch) is kept for the
     X7 record: it was not learned in 10k steps by Lion or AdamW."""
-    from intgrad.models.transformer import build
     torch.manual_seed(seed)
     T = 4 * pairs + 2
-    m = build(preset, T=T, **model_kw).to(device)
+    m = _tf(preset, T, qc, device, **model_kw)
     acc = _train_masked(m, lambda B, g: _mqar_batch(B, pairs, T, g), steps, lr, wd, batch,
-                        device, seed, betas)
+                        device, seed, betas, qc=qc)
     return {"acc": acc, "pass": acc >= 0.95}
 
 
-def p1_memorize_tf(device="cpu", steps=600, lr=1e-3, wd=0.1, seed=0, preset="XS") -> dict:
+def p1_memorize_tf(device="cpu", steps=600, lr=1e-3, wd=0.1, seed=0, preset="XS",
+                   qc: QuantConfig | None = None) -> dict:
     """Transformer P1: overfit.txt as one sequence (EOD first); with the
     full prefix as context every position is predictable -> floor ~0."""
-    from intgrad.models.transformer import build
     raw = torch.tensor(list((FIXTURES / "overfit.txt").read_bytes()), dtype=torch.uint8)
     seq = torch.cat([torch.tensor([data.EOD], dtype=torch.uint8), raw])
     T = len(seq) - 1
     torch.manual_seed(seed)
-    m = build(preset, T=T).to(device)
+    m = _tf(preset, T, qc, device)
     x, y = seq[None, :-1], seq[None, 1:]
     mask = torch.ones(1, T, dtype=torch.bool)
-    _train_masked(m, lambda B, g: (x, y, mask), steps, lr, wd, 1, device, seed)
+    _train_masked(m, lambda B, g: (x, y, mask), steps, lr, wd, 1, device, seed, qc=qc)
+    m.eval()
     with torch.no_grad():
         ce = F.cross_entropy(m(x.to(device))[0], y[0].long().to(device)).item()
     return {"ce": ce, "pass": ce < 0.01}

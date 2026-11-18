@@ -799,6 +799,47 @@ underflow, a learned scale has nothing to trade on the log grid, as
 §5 M4 expected. Where a learned scale does trade range against
 resolution is the linear int8 grid, which phase C re-tests.
 
+**X14 — M4 gate: full byte numerics at S and M (2026-11-18).** Stage d
+of X13: 16-bit master weights with byte forward, activations and the
+residual stream on the byte grid (delayed pow2 scales), max-relative
+scores and logits, and byte-grid attention probabilities. Ladder
+horizon (300 MB), seed 42, against the m3-ladder fp twins (X10).
+
+| step | S fp | S quant | M fp | M quant |
+|---|---|---|---|---|
+| 2000 | 2.0756 | 2.0984 | 1.9982 | 2.0173 |
+| 4000 | 1.9863 | 1.9966 | 1.9259 | 1.9245 |
+| 6000 | 1.8887 | 1.8948 | 1.8145 | 1.8108 |
+| 8000 | 1.7289 | 1.7410 | 1.6466 | 1.6415 |
+| **9155** | **1.6684** | **1.6814 (+0.013)** | **1.5797** | **1.5760 (−0.004)** |
+
+**The gate passes:** S +0.013 and M −0.004, against the allowed 0.10.
+Samples are 32/32 valid UTF-8 at both sizes. The quantized model starts
+behind (+0.02 at step 2000) and catches up; at M the gap is within
+noise.
+
+Throughput (quant vs fp):
+
+| | quant | fp |
+|---|---|---|
+| S | 235 kB/s | 477 kB/s |
+| M (micro-batch 16) | 87 kB/s | 166 kB/s |
+
+The first M attempt hit OOM in the interim eval: 64 windows of explicit
+attention at T = 1024. The eval batch is now sized to ≤ 2²⁷ scores per
+tensor; that is safe because the scales are frozen at eval.
+
+Probes, fp vs stage-d quantization (probes take `qc=`; scored with frozen
+scales; `runs/m4_probes.py`). Pass thresholds: P2 ≥ 0.99, P3 ≥ 0.95.
+
+| | P1 memorize (CE) | P2 copy | P3 MQAR |
+|---|---|---|---|
+| fp, XS / S | 0.0000 / 0.0000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| quant, XS / S | 0.0001 / 0.0000 | 0.992 / 1.000 | 1.000 / 1.000 |
+
+All pass quantized. P2 at XS is closest to its threshold. P4 (UTF-8
+validity) is 32/32 at S and M (above).
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
