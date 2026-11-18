@@ -130,8 +130,11 @@ class Hourglass(ByteLM):
         through the global core (X21: the wider byte paths short-cut it).
         patching (see patch_ends): "fixed" k-byte patches; "utf8" k-byte
         grid snapped to character ends; "chars" k characters per patch.
-        utf8/chars need byte_mix "patch" (segment-masked byte attention);
-        the patch vector is the encoder state of the patch's last byte."""
+        utf8/chars need byte_mix "patch" (segment-masked byte attention).
+        Both paths have the same width: the patch vector is built from the
+        last k encoder states up to the patch end, and the upsample gives
+        each later byte its own vector by offset from that end (clipped at
+        k-1), so on pure ASCII utf8 patching is exactly fixed patching."""
         super().__init__()
         if T % k:
             raise ValueError(f"T={T} must be a multiple of k={k}")
@@ -161,7 +164,7 @@ class Hourglass(ByteLM):
         nn.init.normal_(self.emb.weight, std=0.02)
         self.enc = nn.ModuleList(byte_block() for _ in range(enc))
         self.n_down = nn.RMSNorm(d_b)
-        kd = d_b if var else k * d_b           # last-byte state vs k concatenated bytes
+        kd = k * d_b                            # k byte states per patch, both ways
         self.down = nn.Linear(kd, d, bias=False)
         nn.init.normal_(self.down.weight, std=1.0 / math.sqrt(kd))
         self.blocks = nn.ModuleList(Block(d, H, L, qk_norm, qkv_conv, qat) for _ in range(L))
@@ -220,8 +223,9 @@ class Hourglass(ByteLM):
             tap("emb", h)
         if slot is None:
             g = self.down(_q(qs, "down", self.n_down(h)).reshape(B, Tg, k * self.d_b))
-        else:                                   # last byte of each patch -> its slot
-            v = self.down(_q(qs, "down", self.n_down(h)))
+        else:                                   # last k bytes up to each patch end -> its slot
+            hn = F.pad(_q(qs, "down", self.n_down(h)), (0, 0, k - 1, 0))
+            v = self.down(hn.unfold(1, k, 1).transpose(2, 3).reshape(B, T, k * self.d_b))
             idx = torch.where(slot >= 0, slot, Tg)[..., None].expand(-1, -1, self.d)
             g = torch.zeros(B, Tg + 1, self.d, device=x.device, dtype=v.dtype).scatter(1, idx, v)[:, :Tg]
         rope = self.rope(x.device)
@@ -237,8 +241,12 @@ class Hourglass(ByteLM):
             u = F.pad(u, (0, 0, k - 1, 0))[:, :T]      # patch j -> bytes jk+k-1 ..
         else:                                   # latest patch completed at or before t
             U = F.pad(self.up(_q(qs, "up", self.n_up(g))), (0, 0, 1, 0))   # slot -1 -> 0
+            U = U.reshape(B, (Tg + 1) * k, self.d_b)
+            tt = torch.arange(T, device=x.device).expand(B, T)
             last = torch.cummax(slot, 1).values + 1
-            u = torch.gather(U, 1, last[..., None].expand(-1, -1, self.d_b))
+            endp = torch.cummax(torch.where(slot >= 0, tt, -1), 1).values
+            off = (tt - endp).clamp(max=k - 1)
+            u = torch.gather(U, 1, (last * k + off)[..., None].expand(-1, -1, self.d_b))
         h = h + u
         for blk in self.dec:
             h = self._bblk(blk, h, mask)

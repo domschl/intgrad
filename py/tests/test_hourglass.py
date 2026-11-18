@@ -200,3 +200,16 @@ def test_utf8_patching_trains_and_scores(mode):
     loss.backward()
     assert all(p.grad is not None for p in m.parameters())
     assert m.chunk_bits(utf8_text(70, 5)[None]).shape == (1, 69)
+
+
+def test_utf8_model_on_ascii_equals_fixed_model():
+    """Same weights, pure ASCII: the variable-patch path (segment mask,
+    window down, offset up) must reproduce the fixed-patch path."""
+    torch.manual_seed(0)
+    kw = dict(d=64, L=2, H=2, T=32, k=4, d_b=32, byte_mix="patch", byte_dh=16)
+    a = Hourglass(**kw).eval()
+    b = Hourglass(**kw, patching="utf8").eval()
+    b.load_state_dict(a.state_dict())
+    x = torch.tensor([list(b"plain ascii text, exactly fixed!")] * 2)
+    torch.testing.assert_close(b(x), a(x), rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(b(x[:, :19]), a(x[:, :19]), rtol=1e-4, atol=1e-4)
