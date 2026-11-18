@@ -44,6 +44,7 @@ DEFAULTS = {
               "compile": False, "final_eval": True, "betas": [0.9, 0.99],
               "micro_batch": 0,  # >0: gradient accumulation over micro-batches
               "norm_wd": 0.0, "conv_decay": "zero",
+              "lr_emb": 1.0, "lr_vec": 1.0,  # lr multipliers: embedding/head, gains
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
 }
@@ -86,21 +87,27 @@ def context_len(cfg: dict, model) -> int:
     return model.ctx if cfg["model"]["kind"] == "mlp" else model.T
 
 
-def param_groups(model, wd: float, norm_wd: float = 0.0, conv_decay: str = "zero") -> list[dict]:
+def param_groups(model, wd: float, norm_wd: float = 0.0, conv_decay: str = "zero",
+                 lr_emb: float = 1.0, lr_vec: float = 1.0) -> list[dict]:
     """Weight decay groups.
     matrices (2-D, incl. embeddings): wd toward 0 (Lion bound |w| <= 1/wd);
     gains/biases (1-D): no decay by default, or norm_wd toward their init
         value (gains -> 1; Lion bound |g - 1| <= 1/norm_wd);
     conv kernels (3-D): conv_decay "zero" (decay toward 0 with the matrices,
-        the M3 default), "init" (toward their identity init) or "none"."""
+        the M3 default), "init" (toward their identity init) or "none".
+    lr_emb / lr_vec: lr multipliers ("lr_mult") for the byte embedding (tied
+        output head) and the 1-D gains (M5)."""
     if cfg_is_mlp(model):                      # C-oracle parity: wd everywhere
         return [{"params": list(model.parameters()), "wd": wd}]
-    mats = [p for p in model.parameters() if p.ndim == 2]
+    emb = model.emb.weight if lr_emb != 1.0 else None
+    mats = [p for p in model.parameters() if p.ndim == 2 and p is not emb]
     vecs = [p for p in model.parameters() if p.ndim < 2]
     convs = [p for p in model.parameters() if p.ndim >= 3]
     groups = [{"params": mats, "wd": wd}]
-    groups.append({"params": vecs, "wd": norm_wd, "anchor": "init"} if norm_wd
-                  else {"params": vecs, "wd": 0.0})
+    groups.append({"params": vecs, "wd": norm_wd, "anchor": "init", "lr_mult": lr_vec} if norm_wd
+                  else {"params": vecs, "wd": 0.0, "lr_mult": lr_vec})
+    if emb is not None:
+        groups.append({"params": [emb], "wd": wd, "lr_mult": lr_emb})
     if convs:
         if conv_decay == "zero":
             groups[0]["params"] = mats + convs
@@ -186,7 +193,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     qc = QuantConfig(**q)
     model = build_model(cfg, qc, gen).to(dev)
     sr_gen = torch.Generator(device=dev).manual_seed(t["seed"] + 1)
-    opt = Lion(param_groups(model, t["wd"], t["norm_wd"], t["conv_decay"]),
+    opt = Lion(param_groups(model, t["wd"], t["norm_wd"], t["conv_decay"], t["lr_emb"], t["lr_vec"]),
                lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen,
                betas=tuple(t["betas"]))
     ix = data.Index(idx_path)
@@ -210,7 +217,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     for step in range(start, end):
         lr = lr_at(step, t)
         for g in opt.param_groups:
-            g["lr"] = lr
+            g["lr"] = lr * g.get("lr_mult", 1.0)
         b = batcher.next()
         x = torch.from_numpy(b.x).to(dev, non_blocking=True)
         opt.zero_grad(set_to_none=True)

@@ -350,7 +350,14 @@ Acceptance (fp mode): P2, P3, P4 pass at XS/S; the ladder is monotone at a
 fixed byte budget; S beats xz and the 5-gram on eval-v1; throughput
 measured and recorded (estimate: S ≥ 300 kB/s on the 4070 Ti).
 
-### M4 — Quantized transformer (the core result of plan 001)
+### M4 — Quantized transformer (the core result of plan 001) ✅
+Outcome: full byte numerics (stage d) pass the gate at S (+0.013 bpb)
+and M (−0.004), and the probes pass quantized (X13, X14). Weight storage
+stays w2 (X15). Softmax inputs are max-relative (D12). Activation scales
+use delayed absmax; learned scales (D10) and the linear-int8 re-test were
+dropped by user decision after X13 showed no range pressure on the log
+grid.
+
 **Status (started 2026-11-17).** Built:
 - `quant.acts` / `resid` / `softmax` / `probs` switches. `quant.enabled` is
   the weight storage (Lion 16-bit master codes, forward = high byte).
@@ -429,6 +436,22 @@ for embeddings/norms, and check stability at M/L. Lion counts as a
 M/L, or (ii) quantized-Lion cannot reach the M4 gate while fp-Lion can.
 Only then does a plan 00x consider another optimizer.
 
+**Status (started 2026-11-18).** Neither dead-end criterion holds
+going in: fp-Lion is stable up to L (X10), and quantized Lion passes the
+gate (X14). M5 therefore tunes Lion **for the quantized model** (stage
+d, the target numerics) and checks stability at L.
+- Round 1, screening: S, 4000 steps, seed 42. Grid lr {1.5, 3, 6}e-3 ×
+  wd {1, 3} × β2 {0.98, 0.99}, with β1 0.95 (X7).
+- Round 2, at the round-1 best:
+  - per-group lr multipliers for the embedding/head (`train.lr_emb`) and
+    the gains (`train.lr_vec`), {0.3, 3} each;
+  - batch {32, 128} at a constant byte budget.
+- Round 3: best vs the current default at the ladder horizon, 2 seeds.
+- Round 4: quantized L at the ladder horizon (stability), plus M if the
+  defaults changed.
+
+Estimated GPU time ≈ 6–7 h.
+
 ### M6 — Recurrence readiness (hand-off to plan 002)
 Using the sequential batcher, measure the non-recurrent model's
 **position curve** and **cross-window loss**: the bpb of the first 64 bytes
@@ -471,7 +494,11 @@ Deliverables: metric implemented, baseline numbers recorded,
 - **001-D10 Learned quantization scales are an M4 experiment (user
   decision).** TQT/LSQ-style learned pow2 scales vs delayed absmax, with
   oscillation handled by Lion momentum, latent EMA or hysteresis
-  (§5 M4). Measured, not assumed.
+  (§5 M4). Measured, not assumed. *Closed without the experiment (user
+  decision, 2026-11-18).* X13 found no clamps and negligible underflow
+  at delayed-absmax scales on the log grid, so a learned scale has
+  nothing to trade there. The linear-int8 re-test, where it would
+  matter, is skipped too.
 - **001-D9 Lion stays; magnitudes are controlled by design (user
   decision after X6).** The right lr works, and M3 builds in QK-norm,
   z-loss, an optional soft-cap, range telemetry and an early lr × wd

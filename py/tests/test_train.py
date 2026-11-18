@@ -70,3 +70,14 @@ def test_lion_anchor_decays_toward_init():
         g.grad = torch.zeros(4)
         opt.step()
     assert torch.allclose(g.detach(), torch.full((4,), 3.0), atol=1e-3)
+
+
+def test_lr_multipliers_split_embedding_and_gains():
+    from intgrad.models.transformer import build
+    m = build("XS")
+    gs = train.param_groups(m, 3.0, lr_emb=2.0, lr_vec=0.5)
+    by = {id(p): g for g in gs for p in g["params"]}
+    assert by[id(m.emb.weight)]["lr_mult"] == 2.0 and by[id(m.emb.weight)]["wd"] == 3.0
+    assert by[id(m.nf.weight)]["lr_mult"] == 0.5
+    assert by[id(m.blocks[0].qkv.weight)].get("lr_mult", 1.0) == 1.0
+    assert sum(len(g["params"]) for g in gs) == len(list(m.parameters()))
