@@ -2,56 +2,66 @@
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
-/* Layout: schematic sheet — preset switcher, two diagrams side by side (stack | block), parameter table below. */
+/* Layout: schematic sheet — architecture + preset switchers, stack | block diagrams, byte-level panel (hourglass), parameter table. */
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2330; --muted: #5d6879; --line: #c9d0db;
   --node: #eef1f6; --node-line: #9aa6b8; --accent: #0f7b74; --accent-soft: #dff1ef;
-  --fx: #a35a12; --fx-soft: #f6e9da;
+  --fx: #a35a12; --fx-soft: #f6e9da; --byte: #f3f0fa; --byte-line: #8a78b8; --byte-ink: #5b4a91;
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --line: #333d4b;
   --node: #222a35; --node-line: #4b5768; --accent: #43c2b7; --accent-soft: #163633;
-  --fx: #e0a060; --fx-soft: #3a2a19; color-scheme: dark } }
+  --fx: #e0a060; --fx-soft: #3a2a19; --byte: #262236; --byte-line: #8f7fc4; --byte-ink: #b9a9ea; color-scheme: dark } }
 :root[data-theme="dark"] {
   --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --line: #333d4b;
   --node: #222a35; --node-line: #4b5768; --accent: #43c2b7; --accent-soft: #163633;
-  --fx: #e0a060; --fx-soft: #3a2a19; color-scheme: dark }
+  --fx: #e0a060; --fx-soft: #3a2a19; --byte: #262236; --byte-line: #8f7fc4; --byte-ink: #b9a9ea; color-scheme: dark }
 body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.5;
   padding-block: 28px 48px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
 .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 22px; }
 h1 { font-size: 1.6rem; font-weight: 600; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
-.sub { color: var(--muted); max-width: 70ch; margin: 4px 0 0; }
+.sub { color: var(--muted); max-width: 72ch; margin: 4px 0 0; }
 .bar { display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); }
-.seg button { font: 500 0.95rem var(--mono); color: var(--muted); background: transparent; border: 0; padding: 7px 16px; cursor: pointer; }
+.seg button { font: 500 0.95rem var(--mono); color: var(--muted); background: transparent; border: 0; padding: 7px 14px; cursor: pointer; }
 .seg button + button { border-left: 1px solid var(--line); }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.seg button:disabled { opacity: 0.35; cursor: default; }
 .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .facts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 0.9rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .facts b { color: var(--ink); font-weight: 500; }
-.grid { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 22px; }
+.grid { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr); gap: 22px; align-items: start; }
 @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 16px 10px; min-width: 0; }
 .panel h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+.panel h3 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 14px 0 6px; font-weight: 600; }
 .svgbox { overflow-x: auto; }
 svg { display: block; width: 100%; height: auto; min-width: 300px; }
 svg text { font-family: var(--sans); fill: var(--ink); }
 svg .mono { font-family: var(--mono); font-size: 11.5px; fill: var(--muted); }
 svg .t { font-size: 13px; font-weight: 600; }
 svg .node { fill: var(--node); stroke: var(--node-line); stroke-width: 1; }
+svg .bnode { fill: var(--byte); stroke: var(--byte-line); stroke-width: 1; }
 svg .iface { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 5 4; }
 svg .iface-t { fill: var(--accent); }
 svg .fxn { fill: var(--fx-soft); stroke: var(--fx); stroke-width: 1; }
 svg .edge { stroke: var(--node-line); stroke-width: 1.4; fill: none; }
+svg .skip { stroke: var(--byte-line); stroke-width: 1.8; fill: none; stroke-dasharray: 6 4; }
+svg .skip-t { fill: var(--byte-ink); font-family: var(--mono); font-size: 11px; }
 svg .resid { stroke: var(--ink); stroke-width: 2.2; fill: none; }
 svg .arrowhead { fill: var(--node-line); }
 svg .plus { fill: var(--panel); stroke: var(--ink); stroke-width: 1.6; }
+svg .cell { fill: var(--panel); stroke: var(--node-line); stroke-width: 1; }
+svg .cell-on { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+svg .cell-off { fill: var(--node); stroke: var(--line); stroke-width: 1; }
+svg .brace { stroke: var(--byte-line); stroke-width: 1.4; fill: none; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.85rem; color: var(--muted); margin: 6px 0 4px; }
 .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; border: 1px solid var(--node-line); background: var(--node); }
 .sw.fx { background: var(--fx-soft); border-color: var(--fx); }
 .sw.if { background: var(--accent-soft); border: 1.5px dashed var(--accent); }
+.sw.by { background: var(--byte); border-color: var(--byte-line); }
 .tbl { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -59,44 +69,60 @@ th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; colo
 td.n { text-align: right; font-family: var(--mono); }
 td.s { font-family: var(--mono); color: var(--muted); }
 tr.tot td { font-weight: 600; border-bottom: 0; }
+tr.sec td { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; padding-top: 14px; }
 .grid-tag { font-family: var(--mono); font-size: 0.78rem; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--node-line); color: var(--muted); }
 .grid-tag.fx { border-color: var(--fx); color: var(--fx); }
-.notes { color: var(--muted); font-size: 0.9rem; max-width: 80ch; display: grid; gap: 6px; }
+.notes { color: var(--muted); font-size: 0.9rem; max-width: 82ch; display: grid; gap: 6px; }
 .notes p { margin: 0; }
+[hidden] { display: none !important; }
 </style>
 
 <div class="wrap">
   <header>
     <h1>intgrad Byte Transformer</h1>
-    <p class="sub">Decoder-only model over raw UTF-8 bytes (vocabulary 256, no tokenizer), as built for plan/001 M3. Pick a preset to see every dimension. The dashed band marks the mid-stack latent interface where recurrence and memory experiments will attach.</p>
+    <p class="sub">Decoder-only models over raw UTF-8 bytes (vocabulary 256, no tokenizer), plan/001. <b>Flat</b> is the M3–M5 model. <b>Hourglass</b> (M6) compresses k bytes into one patch before the transformer and expands back to bytes before the logits. Pick an architecture and a preset to see every dimension. The dashed band marks the mid-stack latent where recurrence and memory experiments will attach.</p>
   </header>
 
   <div class="bar">
-    <div class="seg" role="group" aria-label="Model preset">
-      <button id="p-XS" data-p="XS">XS</button><button id="p-S" data-p="S">S</button><button id="p-Sdeep" data-p="S-deep">S-deep</button><button id="p-M" data-p="M">M</button><button id="p-L" data-p="L">L</button>
+    <div class="seg" role="group" aria-label="Architecture">
+      <button data-a="flat">flat</button><button data-a="hourglass">hourglass</button>
     </div>
-    <div class="seg" role="group" aria-label="Variants">
-      <button id="v-stem" data-v="stem">conv stem</button><button id="v-qkv" data-v="qkv">q/k/v conv</button>
+    <div class="seg" role="group" aria-label="Model preset">
+      <button data-p="XS">XS</button><button data-p="S">S</button><button data-p="S-deep">S-deep</button><button data-p="M">M</button><button data-p="L">L</button>
+    </div>
+    <div class="seg" role="group" aria-label="Patch size" id="kseg">
+      <button data-k="2">k 2</button><button data-k="4">k 4</button>
+    </div>
+    <div class="seg" role="group" aria-label="Variants" id="vseg">
+      <button data-v="stem">conv stem</button><button data-v="qkv">q/k/v conv</button>
     </div>
     <div class="facts" id="facts"></div>
   </div>
 
-  <section class="panel">
-    <h2>Variants tested on S (decision 001-D11, plan/001 X9: eval-v1 val bpb, mean of 2 seeds)</h2>
-    <div class="tbl"><table id="vtab"></table></div>
-  </section>
-
   <div class="grid">
     <section class="panel">
-      <h2>Stack</h2>
+      <h2 id="stack-h">Stack</h2>
       <div class="svgbox"><svg id="stack" viewBox="0 0 380 760" role="img" aria-label="Model stack from input bytes to loss"></svg></div>
     </section>
-    <section class="panel">
-      <h2>One block (repeated L times)</h2>
-      <div class="svgbox"><svg id="block" viewBox="0 0 520 760" role="img" aria-label="Transformer block: attention and MLP sub-layers on the residual stream"></svg></div>
-      <div class="legend"><span><span class="sw"></span>byte symlog grid in M4 (weights, activations)</span><span><span class="sw fx"></span>fixed-point grid in M4 (scores, logits)</span><span><span class="sw if"></span>latent interface (plan 002)</span></div>
-    </section>
+    <div style="display:grid;gap:22px;min-width:0">
+      <section class="panel">
+        <h2 id="block-h">One block (repeated L times)</h2>
+        <div class="svgbox"><svg id="block" viewBox="0 0 520 760" role="img" aria-label="Transformer block: attention and MLP sub-layers on the residual stream"></svg></div>
+        <div class="legend"><span><span class="sw"></span>patch / token level</span><span class="hg-only"><span class="sw by"></span>byte level</span><span><span class="sw fx"></span>softmax input: max-relative byte (001-D12)</span><span><span class="sw if"></span>latent interface (plan 002)</span></div>
+      </section>
+      <section class="panel hg-only">
+        <h2>Byte block (2 in the encoder, 2 in the decoder)</h2>
+        <div class="svgbox"><svg id="bblock" viewBox="0 0 520 470" role="img" aria-label="Byte block: causal depthwise convolution and MLP on the byte-level residual stream"></svg></div>
+        <h3>Which patch each byte position may use (causal shift by k − 1)</h3>
+        <div class="svgbox"><svg id="timing" viewBox="0 0 520 170" role="img" aria-label="Timing of patch vectors: patch j reaches byte positions jk+k-1 to jk+2k-2"></svg></div>
+      </section>
+    </div>
   </div>
+
+  <section class="panel">
+    <h2>Variants and results (eval-v1 val bpb)</h2>
+    <div class="tbl"><table id="vtab"></table></div>
+  </section>
 
   <section class="panel">
     <h2>Parameters and tensor shapes</h2>
@@ -104,8 +130,9 @@ tr.tot td { font-weight: 600; border-bottom: 0; }
   </section>
 
   <section class="notes">
-    <p>Shapes use B = batch, T = context length, d = model width, H = heads, d<sub>h</sub> = d/H, f = 4d (MLP width). No biases. With the plain stem the output head reuses the embedding matrix (tied), so the 256 × d table is counted once; the conv stem has its own untied head. All convolutions are causal: position t sees bytes up to t only.</p>
-    <p>Magnitude control (decision 001-D9): pre-RMSNorm, QK-norm on queries and keys, z-loss 1e-4·lse² on the logits, optional soft-cap c·tanh(x/c) on the logits. Training: Lion, fp32 with TF32 in M3; byte numerics with per-tensor power-of-two scales in M4.</p>
+    <p>Shapes use B = batch, T = byte context, d = model (patch) width, H = heads, d<sub>h</sub> = d/H, f = 4d (MLP width). Hourglass adds k = bytes per patch, d<sub>b</sub> = byte width (d/2) and K = byte conv kernel (max(4, k)). No biases. The output head reuses the embedding matrix (tied), except with the conv stem. All convolutions are causal: position t sees bytes up to t only.</p>
+    <p>Hourglass causality: patch j covers bytes jk … jk+k−1, so its global vector exists only once byte jk+k−1 is read. The upsampled vectors are shifted right by k−1. Patch j then feeds the position that completes it and the k−1 positions inside patch j+1. Bytes already read inside the current patch reach the decoder through the byte skip and the causal convs. The tests check this at every offset, and removing the shift makes them fail.</p>
+    <p>Magnitude control (001-D9): pre-RMSNorm, QK-norm, z-loss 1e-4·lse². Training: Lion (lr 3e-3, wd 3, β 0.95/0.98; M5). M4 byte numerics: 16-bit master weights with a byte forward view; activations on the byte symlog grid at delayed power-of-two scales; attention scores and logits max-relative.</p>
   </section>
 </div>
 
@@ -117,15 +144,20 @@ const P = {
   M:  {d:384, L:6, H:6, T:1024},
   L:  {d:512, L:8, H:8, T:1024},
 };
+const HG_T = {2: 1024, 4: 2048};          // byte context per k in the M6 runs (32 KB per step)
 const STEM_DIM = 32;
-// Variant results (plan/001 X9) are filled in once the runs finish.
 const VARIANTS = [
-  {id: "a", name: "Baseline", what: "plain tied 256 × d embedding", delta: "–", status: "1.793 bpb"},
-  {id: "b", name: "Conv stem", what: "256 × 32 embedding → causal conv 32 → d (k 4) → + causal depthwise conv (k 4, dilation 2); untied head", delta: "+42 k params (S)", status: "1.755 (−0.038) · dropped: redundant with c (b+c 1.734)"},
-  {id: "c", name: "q/k/v conv", what: "Primer-style causal depthwise conv (k 3) on q, k, v in every block", delta: "+9 k params (S)", status: "1.740 (−0.053) · KEPT"},
-  {id: "d", name: "S-deep", what: "d 192 × 7 layers instead of d 256 × 4 (same 12·L·d² budget, head width 64)", delta: "−65 k params", status: "1.773 (−0.020) · dropped: marginal, 19% slower"},
+  {id: "a", name: "Flat baseline (S)", what: "plain tied 256 × d embedding", delta: "–", status: "1.793 (4k steps)"},
+  {id: "b", name: "Conv stem", what: "256 × 32 embedding → causal conv 32 → d (k 4) → + depthwise conv (k 4, dil 2); untied head", delta: "+42 k params", status: "1.755 (−0.038) · dropped: redundant with c"},
+  {id: "c", name: "q/k/v conv", what: "Primer-style causal depthwise conv (k 3) on q, k, v in every block", delta: "+9 k params", status: "1.740 (−0.053) · KEPT"},
+  {id: "d", name: "S-deep", what: "d 192 × 7 layers instead of d 256 × 4", delta: "−65 k params", status: "1.773 (−0.020) · dropped"},
+  {id: "L", name: "Flat ladder (fp, 300 MB)", what: "flat + c at 9155 steps × 32 KB", delta: "S / M / L", status: "1.668 (10.5 min) / 1.580 (30 min) / 1.536 (59 min)"},
+  {id: "h1", name: "Hourglass S, k 2", what: "T 1024 bytes → 512 patches; byte width 128; 2 + 2 byte blocks", delta: "3.85 M params", status: "1.766 (9.3 min) · M6 round 1"},
+  {id: "h2", name: "Hourglass S, k 4", what: "T 2048 bytes → 512 patches", delta: "3.98 M params", status: "1.896 (5.2 min) · M6 round 1"},
+  {id: "h3", name: "Hourglass M, k 4", what: "T 2048 → 512 patches; byte width 192", delta: "12.5 M params", status: "running"},
+  {id: "h4", name: "Hourglass L, k 4", what: "T 2048 → 512 patches; byte width 256", delta: "28.4 M params", status: "queued"},
 ];
-const state = {preset: "S", stem: false, qkv: true};
+const state = {arch: "flat", preset: "S", k: 4, stem: false, qkv: true};
 const NS = "http://www.w3.org/2000/svg";
 const fmt = n => n.toLocaleString("en-US");
 const fmtM = n => n >= 1e6 ? (n/1e6).toFixed(2) + " M" : (n/1e3).toFixed(1) + " k";
@@ -152,57 +184,88 @@ function node(svg, x, y, w, h, title, shape, cls = "node", shape2) {
 function arrow(svg, x1, y1, x2, y2) {
   el(svg, "path", {d: `M${x1},${y1} L${x2},${y2}`, class: "edge", "marker-end": `url(#${svg.id}-ah)`});
 }
+function plus(svg, cx, cy) {
+  el(svg, "circle", {cx, cy, r: 9, class: "plus"});
+  el(svg, "text", {x: cx, y: cy + 5, "text-anchor": "middle", class: "t"}, "+");
+}
+function cfg() {
+  const c = {...P[state.preset]};
+  if (state.arch === "hourglass") {
+    c.k = state.k; c.T = HG_T[state.k]; c.db = c.d / 2; c.K = Math.max(4, c.k); c.Tg = c.T / c.k;
+  } else c.Tg = c.T;
+  return c;
+}
 
+// ------------------------------------------------------------------ stack
 function drawStack(c) {
   const s = document.getElementById("stack"); s.replaceChildren(); defs(s);
   const lo = Math.floor(c.L/2), hi = c.L - lo;
-  const emb = state.stem
-    ? ["Conv stem (causal)", `256 × ${STEM_DIM} emb → conv ${STEM_DIM}→${c.d} (k 4)`, "node", 66, `+ depthwise conv (k 4, dil 2): sees 7 bytes`]
-    : ["Byte embedding (tied)", `256 × ${c.d}  →  h: [B, ${c.T}, ${c.d}]`, "node", 50];
-  const head = state.stem
-    ? ["Output head (untied)", `${c.d} → 256  (own weights)`, "node", 50]
-    : ["Output head = embeddingᵀ", `${c.d} → 256  (shared weights)`, "node", 50];
-  const rows = [
-    ["Input bytes", `x: [B, ${c.T}]  uint8, raw UTF-8`, "node", 50],
-    emb,
-    [`Lower blocks 1 … ${lo}`, `${lo} × block  (residual width d = ${c.d})`, "node", 50],
-    ["Mid-stack latent interface", `h_mid: [B, ${c.T}, ${c.d}]  recurrence · memory`, "iface", 50],
-    [`Upper blocks ${lo + 1} … ${c.L}`, `${hi} × block`, "node", 50],
-    ["Final RMSNorm", `gain ${c.d}`, "node", 50],
-    head,
-    ["Logits", `[B, ${c.T}, 256]  optional soft-cap c·tanh(x/c)`, "fxn", 50],
-    ["Loss", "CE (bits/byte) + 1e-4 · lse²  (z-loss)", "node", 50],
-  ];
-  const x = 20, w = 340;
-  let y = 14;
-  rows.forEach(([t, sh, cls, h, sh2], i) => {
-    node(s, x, y, w, h, t, sh, cls, sh2);
-    if (i < rows.length - 1) arrow(s, x + w/2, y + h, x + w/2, y + h + 24);
+  const hg = state.arch === "hourglass";
+  // byte-level rows are wide, patch-level rows narrow: the hourglass shape
+  const WIDE = {x: 14, w: 320}, NARROW = {x: 54, w: 240};
+  let rows;
+  if (!hg) {
+    const emb = state.stem
+      ? ["Conv stem (causal)", `256 × ${STEM_DIM} emb → conv ${STEM_DIM}→${c.d} (k 4)`, "node", 66, `+ depthwise conv (k 4, dil 2): sees 7 bytes`]
+      : ["Byte embedding (tied)", `256 × ${c.d}  →  h: [B, ${c.T}, ${c.d}]`, "node", 50];
+    const head = state.stem
+      ? ["Output head (untied)", `${c.d} → 256  (own weights)`, "node", 50]
+      : ["Output head = embeddingᵀ", `${c.d} → 256  (shared weights)`, "node", 50];
+    rows = [
+      ["Input bytes", `x: [B, ${c.T}]  uint8, raw UTF-8`, "node", 50],
+      emb,
+      [`Lower blocks 1 … ${lo}`, `${lo} × block  (residual width d = ${c.d})`, "node", 50],
+      ["Mid-stack latent interface", `h_mid: [B, ${c.T}, ${c.d}]  recurrence · memory`, "iface", 50],
+      [`Upper blocks ${lo + 1} … ${c.L}`, `${hi} × block`, "node", 50],
+      ["Final RMSNorm", `gain ${c.d}`, "node", 50],
+      head,
+      ["Logits", `[B, ${c.T}, 256]  max-relative byte (D12)`, "fxn", 50],
+      ["Loss", "CE (bits/byte) + 1e-4 · lse²  (z-loss)", "node", 50],
+    ].map(r => [...r, WIDE]);
+  } else {
+    rows = [
+      ["Input bytes", `x: [B, ${c.T}]  uint8, raw UTF-8`, "bnode", 50, undefined, WIDE],
+      ["Byte embedding (tied)", `256 × ${c.db}  →  [B, ${c.T}, ${c.db}]`, "bnode", 50, undefined, WIDE],
+      ["Byte encoder", `2 × byte block  (width ${c.db}, conv K ${c.K})`, "bnode", 50, undefined, WIDE, "enc"],
+      ["Downsample", `concat ${c.k} bytes → Linear ${c.k * c.db} → ${c.d}`, "node", 66, `[B, ${c.Tg}, ${c.d}]  one vector per patch`, NARROW],
+      [`Global blocks 1 … ${lo}`, `${lo} × block on ${c.Tg} patches`, "node", 50, undefined, NARROW],
+      ["Mid-stack latent", `h_mid: [B, ${c.Tg}, ${c.d}]  patch level`, "iface", 50, undefined, NARROW],
+      [`Global blocks ${lo + 1} … ${c.L}`, `${hi} × block`, "node", 50, undefined, NARROW],
+      ["Upsample + shift", `RMSNorm, Linear ${c.d} → ${c.k} × ${c.db}`, "node", 66, `shift right ${c.k - 1} byte${c.k > 2 ? "s" : ""} → [B, ${c.T}, ${c.db}]`, NARROW],
+      ["+", "", "plus", 26, undefined, WIDE],
+      ["Byte decoder", `2 × byte block  (width ${c.db})`, "bnode", 50, undefined, WIDE],
+      ["Final RMSNorm + head = embᵀ", `${c.db} → 256  (shared weights)`, "bnode", 50, undefined, WIDE],
+      ["Logits", `[B, ${c.T}, 256]  max-relative byte (D12)`, "fxn", 50, undefined, WIDE],
+      ["Loss", "CE (bits/byte) + 1e-4 · lse²", "node", 50, undefined, WIDE],
+    ];
+  }
+  const cx = WIDE.x + WIDE.w / 2, skipX = 362;
+  let y = 14, yEnc = 0;
+  rows.forEach(([t, sh, cls, h, sh2, box, tag], i) => {
+    if (cls === "plus") {
+      plus(s, cx, y + 13);
+      // byte skip from the encoder output into this sum
+      el(s, "path", {d: `M${WIDE.x + WIDE.w},${yEnc} L${skipX},${yEnc} L${skipX},${y + 13} L${cx + 11},${y + 13}`, class: "skip", "marker-end": `url(#${s.id}-ah)`});
+      const ym = (yEnc + y + 13) / 2;
+      el(s, "text", {x: skipX - 6, y: ym, class: "skip-t", "text-anchor": "middle", transform: `rotate(-90 ${skipX - 6} ${ym})`}, "byte skip");
+    } else {
+      node(s, box.x, y, box.w, h, t, sh, cls, sh2);
+    }
+    if (tag === "enc") yEnc = y + h / 2;
+    if (i < rows.length - 1) arrow(s, cx, y + h, cx, y + h + 24);
     y += h + 28;
   });
+  s.setAttribute("viewBox", `0 0 380 ${y - 10}`);
 }
 
-function drawBlock(c) {
-  const s = document.getElementById("block"); s.replaceChildren(); defs(s);
-  const dh = c.d / c.H, f = 4 * c.d, rx = 40, bx = 110, bw = 390;
-  el(s, "path", {d: `M${rx},14 L${rx},748`, class: "resid", "marker-end": `url(#${s.id}-ah)`});
-  el(s, "text", {x: rx + 8, y: 26, class: "mono"}, `residual stream [B, T, ${c.d}]`);
-  const A = [
-    ["RMSNorm", `gain ${c.d}`, "node"],
-    state.qkv
-      ? ["qkv projection + causal conv", `${c.d} → ${3*c.d}, then depthwise conv k 3 per channel`, "node"]
-      : ["qkv projection", `${c.d} → ${3*c.d}  =  3 × ${c.H} heads × ${dh}`, "node"],
-    ["QK-norm + RoPE", `RMSNorm(${dh}) on q and k · rotary positions`, "node"],
-    ["Causal attention", `scores qkᵀ/√${dh}: [B, ${c.H}, T, T] · softmax · ×v`, "fxn"],
-    ["Output projection", `${c.H} × ${dh} → ${c.d}`, "node"],
-  ];
-  const M = [
-    ["RMSNorm", `gain ${c.d}`, "node"],
-    ["Up projection", `${c.d} → ${f}`, "node"],
-    ["ReLU²", `max(0, u)²  on [B, T, ${f}]`, "node"],
-    ["Down projection", `${f} → ${c.d}`, "node"],
-  ];
-  const h = 46, gap = 18;
+// ------------------------------------------------------------------ blocks
+function drawResidualBlock(svgId, c, A, M, width, residLabel, labels) {
+  const s = document.getElementById(svgId); s.replaceChildren(); defs(s);
+  const rx = 40, bx = 110, bw = 390, h = 46, gap = 18;
+  const count = A.length + M.length;
+  const H = 54 + count * (h + gap) + 46 + 40;
+  el(s, "path", {d: `M${rx},14 L${rx},${H - 12}`, class: "resid", "marker-end": `url(#${s.id}-ah)`});
+  el(s, "text", {x: rx + 8, y: 26, class: "mono"}, residLabel);
   function branch(rows, y0, label) {
     el(s, "text", {x: bx, y: y0 - 8, class: "mono"}, label);
     arrow(s, rx, y0 + h/2, bx - 2, y0 + h/2);
@@ -214,25 +277,81 @@ function drawBlock(c) {
     });
     const ys = y + 6;
     el(s, "path", {d: `M${bx + bw/2},${y - gap} L${bx + bw/2},${ys} L${rx + 9},${ys}`, class: "edge", "marker-end": `url(#${s.id}-ah)`});
-    el(s, "circle", {cx: rx, cy: ys, r: 9, class: "plus"});
-    el(s, "text", {x: rx, y: ys + 5, "text-anchor": "middle", class: "t"}, "+");
+    plus(s, rx, ys);
     return ys;
   }
-  const yA = branch(A, 54, "attention sub-layer");
-  branch(M, yA + 46, "MLP sub-layer");
+  const yA = branch(A, 54, labels[0]);
+  const yM = branch(M, yA + 46, labels[1]);
+  s.setAttribute("viewBox", `0 0 520 ${yM + 30}`);
 }
 
-function paramRows(c) {
-  const d = c.d, L = c.L, dh = d / c.H, f = 4 * d;
-  const rows = [];
-  if (state.stem) {
-    rows.push(["Byte embedding", "256 × r", `256 × ${STEM_DIM}`, 256*STEM_DIM, 1, "byte"]);
-    rows.push(["Stem conv (causal, k 4)", "r × d × 4", `${STEM_DIM} × ${d} × 4`, STEM_DIM*d*4, 1, "byte"]);
-    rows.push(["Stem depthwise conv (k 4, dil 2)", "d × 4", `${d} × 4`, d*4, 1, "byte"]);
-    rows.push(["Output head (untied)", "d × 256", `${d} × 256`, 256*d, 1, "byte"]);
-  } else {
-    rows.push(["Byte embedding / tied head", "256 × d", `256 × ${d}`, 256*d, 1, "byte"]);
+function drawBlock(c) {
+  const dh = c.d / c.H, f = 4 * c.d, T = state.arch === "hourglass" ? "T/k" : "T";
+  const A = [
+    ["RMSNorm", `gain ${c.d}`, "node"],
+    state.qkv
+      ? ["qkv projection + causal conv", `${c.d} → ${3*c.d}, then depthwise conv k 3 per channel`, "node"]
+      : ["qkv projection", `${c.d} → ${3*c.d}  =  3 × ${c.H} heads × ${dh}`, "node"],
+    ["QK-norm + RoPE", `RMSNorm(${dh}) on q and k · rotary positions`, "node"],
+    ["Causal attention", `scores qkᵀ/√${dh}: [B, ${c.H}, ${c.Tg}, ${c.Tg}] · softmax · ×v`, "fxn"],
+    ["Output projection", `${c.H} × ${dh} → ${c.d}`, "node"],
+  ];
+  const M = [
+    ["RMSNorm", `gain ${c.d}`, "node"],
+    ["Up projection", `${c.d} → ${f}`, "node"],
+    ["ReLU²", `max(0, u)²  on [B, ${T}, ${f}]`, "node"],
+    ["Down projection", `${f} → ${c.d}`, "node"],
+  ];
+  drawResidualBlock("block", c, A, M, c.d, `residual stream [B, ${T}, ${c.d}]`, ["attention sub-layer", "MLP sub-layer"]);
+  document.getElementById("block-h").textContent = state.arch === "hourglass"
+    ? `Global block (repeated L = ${c.L} times, on ${c.Tg} patches)` : `One block (repeated L = ${c.L} times)`;
+}
+
+function drawByteBlock(c) {
+  const db = c.db, fb = 4 * db;
+  const A = [
+    ["RMSNorm", `gain ${db}`, "bnode"],
+    ["Causal depthwise conv", `kernel K = ${c.K} per channel: mixes the last ${c.K} bytes`, "bnode"],
+  ];
+  const M = [
+    ["RMSNorm", `gain ${db}`, "bnode"],
+    ["Up projection", `${db} → ${fb}`, "bnode"],
+    ["ReLU²", `max(0, u)²  on [B, T, ${fb}]`, "bnode"],
+    ["Down projection", `${fb} → ${db}`, "bnode"],
+  ];
+  drawResidualBlock("bblock", c, A, M, db, `byte stream [B, T, ${db}]`, ["time mixing (causal)", "channel mixing"]);
+}
+
+function drawTiming(c) {
+  const s = document.getElementById("timing"); s.replaceChildren(); defs(s);
+  const k = c.k, n = 3 * k, cw = Math.min(36, 440 / n), x0 = 70, ch = 26;
+  el(s, "text", {x: 0, y: 32, class: "mono"}, "byte t");
+  el(s, "text", {x: 0, y: 112, class: "mono"}, "uses");
+  for (let t = 0; t < n; t++) {
+    const x = x0 + t * cw;
+    el(s, "rect", {x, y: 14, width: cw - 3, height: ch, rx: 4, class: "cell"});
+    el(s, "text", {x: x + (cw - 3) / 2, y: 31, "text-anchor": "middle", class: "mono"}, String(t));
+    // global vector available at position t: patch floor((t+1)/k) - 1
+    const j = Math.floor((t + 1) / k) - 1;
+    el(s, "rect", {x, y: 94, width: cw - 3, height: ch, rx: 4, class: j >= 0 ? "cell-on" : "cell-off"});
+    el(s, "text", {x: x + (cw - 3) / 2, y: 111, "text-anchor": "middle", class: "mono"}, j >= 0 ? `g${j}` : "–");
   }
+  for (let j = 0; j < 3; j++) {                 // patch braces under the byte row
+    const xa = x0 + j * k * cw, xb = x0 + (j + 1) * k * cw - 3;
+    el(s, "path", {d: `M${xa},46 L${xa},52 L${xb},52 L${xb},46`, class: "brace"});
+    el(s, "text", {x: (xa + xb) / 2, y: 68, "text-anchor": "middle", class: "skip-t"}, `patch ${j}`);
+    if (j < 2) {                                // g_j becomes usable at t = jk + k - 1
+      const xs = (xa + xb) / 2, xt = x0 + (j * k + k - 1) * cw + (cw - 3) / 2;
+      el(s, "path", {d: `M${xs},72 L${xt},92`, class: "edge", "marker-end": `url(#${s.id}-ah)`});
+    }
+  }
+  el(s, "text", {x: x0, y: 146, class: "mono"}, `g${"j"} = global vector of patch j; known after its last byte, so it predicts from t = jk+${k - 1} on`);
+  el(s, "text", {x: x0, y: 162, class: "mono"}, `positions 0 … ${k - 2} use the byte path only`);
+}
+
+// ------------------------------------------------------------------ table
+function globalRows(c, rows) {
+  const d = c.d, L = c.L, dh = d / c.H, f = 4 * d;
   rows.push(["qkv projection", "d × 3d", `${d} × ${3*d}`, 3*d*d, L, "byte"]);
   if (state.qkv) rows.push(["q/k/v depthwise conv (k 3)", "3d × 3", `${3*d} × 3`, 9*d, L, "byte"]);
   rows.push(["Output projection", "d × d", `${d} × ${d}`, d*d, L, "byte"]);
@@ -240,7 +359,33 @@ function paramRows(c) {
   rows.push(["MLP down", "f × d", `${f} × ${d}`, f*d, L, "byte"]);
   rows.push(["RMSNorm gains (2 per block)", "2 × d", `2 × ${d}`, 2*d, L, "byte"]);
   rows.push(["QK-norm gains", "2 × dₕ", `2 × ${dh}`, 2*dh, L, "byte"]);
-  rows.push(["Final RMSNorm", "d", `${d}`, d, 1, "byte"]);
+}
+function paramRows(c) {
+  const d = c.d, rows = [];
+  if (state.arch === "hourglass") {
+    const db = c.db, k = c.k, K = c.K;
+    rows.push(["§ byte level"]);
+    rows.push(["Byte embedding / tied head", "256 × d_b", `256 × ${db}`, 256*db, 1, "byte"]);
+    rows.push(["Byte block conv (depthwise)", "d_b × K", `${db} × ${K}`, db*K, 4, "byte"]);
+    rows.push(["Byte block MLP up + down", "2 × d_b × 4d_b", `2 × ${db} × ${4*db}`, 8*db*db, 4, "byte"]);
+    rows.push(["Byte block gains (2 per block)", "2 × d_b", `2 × ${db}`, 2*db, 4, "byte"]);
+    rows.push(["Downsample (+ RMSNorm)", "k·d_b × d", `${k*db} × ${d}`, k*db*d + db, 1, "byte"]);
+    rows.push(["§ patch level"]);
+    globalRows(c, rows);
+    rows.push(["Upsample (+ RMSNorm)", "d × k·d_b", `${d} × ${k*db}`, d*k*db + d, 1, "byte"]);
+    rows.push(["Final RMSNorm", "d_b", `${db}`, db, 1, "byte"]);
+  } else {
+    if (state.stem) {
+      rows.push(["Byte embedding", "256 × r", `256 × ${STEM_DIM}`, 256*STEM_DIM, 1, "byte"]);
+      rows.push(["Stem conv (causal, k 4)", "r × d × 4", `${STEM_DIM} × ${d} × 4`, STEM_DIM*d*4, 1, "byte"]);
+      rows.push(["Stem depthwise conv (k 4, dil 2)", "d × 4", `${d} × 4`, d*4, 1, "byte"]);
+      rows.push(["Output head (untied)", "d × 256", `${d} × 256`, 256*d, 1, "byte"]);
+    } else {
+      rows.push(["Byte embedding / tied head", "256 × d", `256 × ${d}`, 256*d, 1, "byte"]);
+    }
+    globalRows(c, rows);
+    rows.push(["Final RMSNorm", "d", `${d}`, d, 1, "byte"]);
+  }
   return rows;
 }
 
@@ -248,40 +393,61 @@ function drawTable(c) {
   const rows = paramRows(c);
   let html = "<tr><th>Component</th><th>Shape</th><th>This model</th><th>Per copy</th><th>Copies</th><th>Total</th><th>Grid (M4)</th></tr>";
   let sum = 0;
-  for (const [n, sh, v, per, k, g] of rows) {
+  for (const r of rows) {
+    if (r.length === 1) { html += `<tr class="sec"><td colspan="7">${r[0].slice(2)}</td></tr>`; continue; }
+    const [n, sh, v, per, k, g] = r;
     sum += per * k;
     html += `<tr><td>${n}</td><td class="s">${sh}</td><td class="s">${v}</td><td class="n">${fmt(per)}</td><td class="n">${k}</td><td class="n">${fmt(per*k)}</td><td><span class="grid-tag">${g}</span></td></tr>`;
   }
-  html += `<tr><td>Attention scores (activation)</td><td class="s">B × H × T × T</td><td class="s">B × ${c.H} × ${c.T} × ${c.T}</td><td class="n">–</td><td class="n">${c.L}</td><td class="n">–</td><td><span class="grid-tag fx">fixed-point</span></td></tr>`;
-  html += `<tr><td>Logits (activation)</td><td class="s">B × T × 256</td><td class="s">B × ${c.T} × 256</td><td class="n">–</td><td class="n">1</td><td class="n">–</td><td><span class="grid-tag fx">fixed-point</span></td></tr>`;
+  const T = state.arch === "hourglass" ? "T/k" : "T";
+  html += `<tr><td>Attention scores (activation)</td><td class="s">B × H × ${T} × ${T}</td><td class="s">B × ${c.H} × ${c.Tg} × ${c.Tg}</td><td class="n">–</td><td class="n">${c.L}</td><td class="n">–</td><td><span class="grid-tag fx">max-relative</span></td></tr>`;
+  html += `<tr><td>Logits (activation)</td><td class="s">B × T × 256</td><td class="s">B × ${c.T} × 256</td><td class="n">–</td><td class="n">1</td><td class="n">–</td><td><span class="grid-tag fx">max-relative</span></td></tr>`;
   html += `<tr class="tot"><td>Total parameters</td><td></td><td></td><td></td><td></td><td class="n">${fmt(sum)}</td><td></td></tr>`;
   document.getElementById("ptab").innerHTML = html;
   return sum;
 }
 
 function drawVariants() {
-  let html = "<tr><th></th><th>Variant</th><th>What changes</th><th>Size vs S</th><th>Result (eval-v1, 2 seeds)</th></tr>";
+  let html = "<tr><th></th><th>Variant</th><th>What changes</th><th>Size</th><th>Result</th></tr>";
   for (const v of VARIANTS) {
-    html += `<tr><td class="s">${v.id}</td><td>${v.name}</td><td style="white-space:normal;min-width:16rem">${v.what}</td><td class="s">${v.delta}</td><td class="s">${v.status}</td></tr>`;
+    html += `<tr><td class="s">${v.id}</td><td>${v.name}</td><td style="white-space:normal;min-width:16rem">${v.what}</td><td class="s">${v.delta}</td><td class="s" style="white-space:normal;min-width:12rem">${v.status}</td></tr>`;
   }
   document.getElementById("vtab").innerHTML = html;
 }
 
 function render() {
-  const c = P[state.preset];
-  document.querySelectorAll("[data-p]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.p === state.preset)));
-  document.querySelectorAll("[data-v]").forEach(b => b.setAttribute("aria-pressed", String(state[b.dataset.v])));
+  const hg = state.arch === "hourglass";
+  if (hg && state.preset === "S-deep") state.preset = "S";
+  if (hg) state.stem = false;
+  const c = cfg();
+  document.querySelectorAll("[data-a]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.a === state.arch)));
+  document.querySelectorAll("[data-p]").forEach(b => {
+    b.setAttribute("aria-pressed", String(b.dataset.p === state.preset));
+    b.disabled = hg && b.dataset.p === "S-deep";
+  });
+  document.querySelectorAll("[data-k]").forEach(b => b.setAttribute("aria-pressed", String(Number(b.dataset.k) === state.k)));
+  document.querySelectorAll("[data-v]").forEach(b => {
+    b.setAttribute("aria-pressed", String(state[b.dataset.v]));
+    b.disabled = hg && b.dataset.v === "stem";
+  });
+  document.getElementById("kseg").hidden = !hg;
+  document.querySelectorAll(".hg-only").forEach(e => e.hidden = !hg);
+  document.getElementById("stack-h").textContent = hg ? `Stack: hourglass, k = ${c.k}` : "Stack: flat";
   drawStack(c); drawBlock(c);
+  if (hg) { drawByteBlock(c); drawTiming(c); }
   const total = drawTable(c);
-  document.getElementById("facts").innerHTML =
-    `<span>d <b>${c.d}</b></span><span>layers <b>${c.L}</b></span><span>heads <b>${c.H} × ${c.d / c.H}</b></span><span>MLP <b>${4*c.d}</b></span><span>context <b>${c.T}</b> bytes</span><span>params <b>${fmtM(total)}</b></span>`;
-  try { localStorage.setItem("arch-state", JSON.stringify({...state, v: 2})); } catch (e) {}
+  document.getElementById("facts").innerHTML = hg
+    ? `<span>d <b>${c.d}</b></span><span>d_b <b>${c.db}</b></span><span>k <b>${c.k}</b></span><span>global layers <b>${c.L}</b></span><span>heads <b>${c.H} × ${c.d / c.H}</b></span><span>context <b>${c.T}</b> bytes = <b>${c.Tg}</b> patches</span><span>params <b>${fmtM(total)}</b></span>`
+    : `<span>d <b>${c.d}</b></span><span>layers <b>${c.L}</b></span><span>heads <b>${c.H} × ${c.d / c.H}</b></span><span>MLP <b>${4*c.d}</b></span><span>context <b>${c.T}</b> bytes</span><span>params <b>${fmtM(total)}</b></span>`;
+  try { localStorage.setItem("arch-state", JSON.stringify({...state, v: 3})); } catch (e) {}
 }
-document.querySelectorAll("[data-p]").forEach(b => b.addEventListener("click", () => { state.preset = b.dataset.p; render(); }));
-document.querySelectorAll("[data-v]").forEach(b => b.addEventListener("click", () => { state[b.dataset.v] = !state[b.dataset.v]; render(); }));
+document.querySelectorAll("[data-a]").forEach(b => b.addEventListener("click", () => { state.arch = b.dataset.a; render(); }));
+document.querySelectorAll("[data-p]").forEach(b => b.addEventListener("click", () => { if (!b.disabled) { state.preset = b.dataset.p; render(); } }));
+document.querySelectorAll("[data-k]").forEach(b => b.addEventListener("click", () => { state.k = Number(b.dataset.k); render(); }));
+document.querySelectorAll("[data-v]").forEach(b => b.addEventListener("click", () => { if (!b.disabled) { state[b.dataset.v] = !state[b.dataset.v]; render(); } }));
 try {
   const saved = JSON.parse(localStorage.getItem("arch-state") || "null");
-  if (saved && saved.v === 2 && P[saved.preset]) Object.assign(state, saved);
+  if (saved && saved.v === 3 && P[saved.preset]) Object.assign(state, saved);
 } catch (e) {}
 drawVariants();
 render();
