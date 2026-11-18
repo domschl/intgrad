@@ -1221,6 +1221,29 @@ segment attention (`6bb37ca`), fp, seed 42, 300 MB.
   2.25e-3 (lr 1.5e-3, wd 1.5), and lr·wd 4.5e-3 at lr 3e-3 / wd 1.5 and
   at lr 7.5e-4 / wd 6, to separate lr from wd.
 
+**X26 — M6 round 7: separating lr from wd at L-utf8 (2026-11-18).**
+Same setup as X25. All seven L-utf8 runs:
+
+| lr \ wd | 1.5 | 3 | 6 | 9 |
+|---|---|---|---|---|
+| 3e-3 | 1.830 | 1.829 | | |
+| 1.5e-3 | 1.808 | 1.809 | 1.868 | |
+| 1e-3 | | | | 1.826 |
+| 7.5e-4 | | | **1.793** | |
+
+- **The lr is the lever:** at a constant lr·wd = 4.5e-3, going from lr
+  3e-3 → 1.5e-3 → 7.5e-4 gives 1.830 → 1.809 → 1.793.
+- **wd is nearly neutral from 1.5 to 3** (Δ ≤ 0.001 at both lrs), but
+  **wd ≥ 6 hurts** (lr 1.5e-3: +0.059 from wd 3 to wd 6).
+- That explains X25's non-monotone result: the lr·wd product rule from
+  flat S (X16–X18) does not carry over to the hourglass core. Its optimum
+  lies at a lower lr. lr 1e-3 · wd 9 and lr 7.5e-4 · wd 6 both carry a wd
+  penalty, so lr 7.5e-4 at wd 3 should be better still.
+- The lower lr also learns faster early: 2.415 at step 2000 against
+  2.602 at the default.
+- The best is still at the edge of the sweep. Round 8: lr 7.5e-4,
+  5e-4 and 3e-4, each at wd 3.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
