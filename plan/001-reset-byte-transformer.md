@@ -1244,6 +1244,29 @@ Same setup as X25. All seven L-utf8 runs:
 - The best is still at the edge of the sweep. Round 8: lr 7.5e-4,
   5e-4 and 3e-4, each at wd 3.
 
+**X27 — M6 round 8: lr optimum for the L-utf8 hourglass (2026-11-18).**
+wd 3, otherwise as X25.
+
+| lr | bpb | wiki-en | wiki-de | books | late drop |
+|---|---|---|---|---|---|
+| 3e-3 (default) | 1.829 | 1.791 | 1.910 | 1.810 | 0.080 |
+| 1.5e-3 | 1.809 | 1.775 | 1.897 | 1.787 | 0.055 |
+| **7.5e-4** | **1.765** | 1.720 | 1.833 | 1.754 | 0.035 |
+| 5e-4 | 1.795 | 1.762 | 1.877 | 1.774 | 0.027 |
+| 3e-4 | 1.847 | 1.831 | 1.958 | 1.807 | 0.020 |
+
+- **Optimum bracketed at lr 7.5e-4 / wd 3:** −0.064 against the
+  default, and −0.082 against L-k4 fixed at the default lr (X23).
+- lr 5e-4 leads at step 4000 (2.157 vs 2.177) but falls behind in the
+  tail. That is the usual low-lr pattern; the late cosine drop shrinks
+  monotonically with lr.
+- **Hourglass default from here: lr 7.5e-4, wd 3.** That is 4× below the
+  flat optimum found at S.
+- Gap to flat L (1.536) is 0.23. The flat L lr was never tuned at L, so
+  round 9 also runs flat L at lr 1.5e-3, to keep the comparison fair.
+- **Round 9:** the best setting trained 4× longer (36,620 steps, 1.2 GB,
+  no data repetition: the corpus is about 20 GB), then flat L at lr 1.5e-3.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).

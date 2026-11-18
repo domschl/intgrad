@@ -17,7 +17,7 @@ enabled = false
 [train]
 steps = 9155
 warmup = 300
-lr = 3e-3
+lr = 7.5e-4                  # hourglass optimum at L (X27); flat: 3e-3
 wd = 3.0
 betas = [0.95, 0.98]
 log_every = 200
