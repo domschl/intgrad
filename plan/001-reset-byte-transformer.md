@@ -881,6 +881,46 @@ worse than both w2 seeds. In exchange it halves the weight state. It
 works, so it is an option if memory binds (plan 002), but w2 stays the
 default.
 
+**X16 — M5 round 1: Lion lr × wd × β2, quantized S (2026-11-18).**
+Stage d, S, 4000 steps, seed 42, β1 0.95.
+
+| lr \ wd, β2 | wd 1, 0.98 | wd 1, 0.99 | wd 3, 0.98 | wd 3, 0.99 |
+|---|---|---|---|---|
+| 1.5e-3 | 1.8420 | 2.0248 | 1.7619 | 1.7924 |
+| 3e-3 | 1.7756 | 1.8354 | **1.7514** | 1.7612 |
+| 6e-3 | 1.7527 | 1.7626 | 1.7768 | 1.7696 |
+
+Findings:
+- **The current default is the optimum** (lr 3e-3, wd 3, β2 0.98).
+- **The controlling variable is lr·wd**, Lion's decoupled decay rate
+  per step: 1.5e-3 → 1.84; 3e-3 → 1.78; 4.5e-3 → 1.76; 6e-3 → 1.75;
+  9e-3 → 1.75; 18e-3 → 1.78 (β2 0.98). The optimum is lr·wd ≈ 6–9e-3,
+  i.e. weights forget over ~110–170 steps. Weak decay with a low lr is
+  badly worse, because nothing bounds the magnitudes (X6).
+- **β2 0.98 beats 0.99 in 5 of 6 cells** (the exception is lr 6e-3,
+  wd 3), so round 2 tries 0.95.
+- **Same-seed reproducibility:** this default cell reruns m4a-d-probs
+  s42 (1.7554) and gives 1.7514. Compiled kernels are nondeterministic,
+  so differences under ~0.005 between single runs are noise.
+
+**X17 — M5 round 2: β2, per-group lr, batch (2026-11-18).** Stage d,
+S, 4000 steps, seed 42, at the X16 optimum (default 1.7514; noise
+≈ ±0.005).
+
+| change | bpb | verdict |
+|---|---|---|
+| β2 0.95 | 1.7608 | worse; keep 0.98 |
+| lr_emb 0.3 (embedding / tied head) | **1.7469** | −0.0045, borderline: round 3 |
+| lr_emb 3 | 1.7527 | noise |
+| lr_vec 0.3 (gains) | 1.7713 | worse |
+| lr_vec 3 | 1.7547 | noise |
+| batch 32, 8000 steps (same bytes) | 1.7809 | worse |
+| batch 128, 2000 steps (micro 64) | 1.8231 | worse |
+
+The gains need their full lr (cf. X12: they must grow). Batch 64 stays;
+at a fixed byte budget, other batch sizes would need their own lr·wd
+retuning.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
