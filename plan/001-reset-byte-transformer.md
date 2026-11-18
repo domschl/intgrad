@@ -1191,6 +1191,36 @@ M core, k 4, patch-local byte path, fp, seed 42, 300 MB.
   larger late cosine drop than flat (0.08–0.09 vs 0.067). The next
   levers are lr for the hourglass core and a longer training run.
 
+**X25 — M6 round 6: L core with utf8 patching, Lion lr × wd (2026-11-18).**
+L (d512 L8, d_b 256), k 4, utf8, patch-local byte path, local O(T·W)
+segment attention (`6bb37ca`), fp, seed 42, 300 MB.
+
+| run | lr | wd | lr·wd | bpb | wiki-en | wiki-de | books | late drop |
+|---|---|---|---|---|---|---|---|---|
+| L-k4 fixed (X23) | 3e-3 | 3 | 9e-3 | 1.847 | 1.819 | 1.950 | 1.817 | 0.086 |
+| L-utf8 | 3e-3 | 3 | 9e-3 | 1.829 | 1.791 | 1.910 | 1.810 | 0.080 |
+| L-utf8 | 1.5e-3 | 6 | 9e-3 | 1.868 | 1.846 | 1.971 | 1.833 | 0.083 |
+| L-utf8 | 1e-3 | 9 | 9e-3 | 1.826 | 1.786 | 1.911 | 1.807 | 0.078 |
+| L-utf8 | 1.5e-3 | 3 | 4.5e-3 | **1.809** | 1.775 | 1.897 | 1.787 | 0.055 |
+
+- **utf8 helps at L as well:** −0.018 against fixed, about the same as at
+  M (X24).
+- **Halving lr·wd is best** (−0.020 against the default). Its late cosine
+  drop shrinks from 0.080 to 0.055: the noise floor that the curves
+  showed. The hourglass core prefers a lower lr·wd than the flat S
+  optimum (6–9e-3, X16–X18).
+- **At constant lr·wd = 9e-3 the result is not monotone in lr** (1.5e-3
+  is worse than both 3e-3 and 1e-3, by 0.04). That is larger than the
+  expected seed noise and is unexplained; the product is not the whole
+  story at L.
+- Wall time is 23.5 min (local band; the dense mask would take ~45).
+  Peak VRAM is 7.3 GB against 5.7 for fixed: the band unfolds K/V to
+  [B,H,T,dh,W]. That is acceptable under 12 GB; a fused band kernel
+  would remove it.
+- The best is at the edge of the sweep. Round 7 brackets it: lr·wd
+  2.25e-3 (lr 1.5e-3, wd 1.5), and lr·wd 4.5e-3 at lr 3e-3 / wd 1.5 and
+  at lr 7.5e-4 / wd 6, to separate lr from wd.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
