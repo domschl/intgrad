@@ -840,6 +840,20 @@ scales; `runs/m4_probes.py`). Pass thresholds: P2 ≥ 0.99, P3 ≥ 0.95.
 All pass quantized. P2 at XS is closest to its threshold. P4 (UTF-8
 validity) is 32/32 at S and M (above).
 
+**X15 — M4 phase C: weight storage, 1 byte + SR vs 2-byte master
+(2026-11-18).** Stage d (X13), S, 4000 steps. The w2 numbers are X13
+stage d.
+
+| storage | s42 | s7 | mean | Δ vs fp |
+|---|---|---|---|---|
+| w2: 16-bit master, RTN, byte forward | 1.7554 | 1.7489 | 1.7522 | +0.015 |
+| w1-SR: byte only, stochastic rounding | 1.7647 | 1.7681 | 1.7664 | +0.029 |
+
+w1-SR costs about +0.014 bpb more than w2 at S; both of its seeds are
+worse than both w2 seeds. In exchange it halves the weight state. It
+works, so it is an option if memory binds (plan 002), but w2 stays the
+default.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
