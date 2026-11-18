@@ -242,3 +242,41 @@ def test_patch_lengths_fit_segment_window():
         seg = torch.cumsum(end.long(), 1) - end.long()
         longest = max(int(torch.bincount(r).max()) for r in seg)
         assert longest <= m.seg_window, (mode, k, longest)
+
+
+def _wide(**kw):
+    return Hourglass(d=64, L=2, H=2, T=64, k=4, d_b=32, byte_mix="patch", byte_dh=16,
+                     patching="utf8", enc_window=16, **kw)
+
+
+def test_wide_encoder_is_causal():
+    torch.manual_seed(3)
+    m = _wide().eval()
+    x = torch.tensor([list(("Grüße – 日本語 ok. " * 6).encode()[:64])])
+    base = m(x)
+    for t in range(0, 63, 5):
+        y = x.clone(); y[0, t + 1:] = (y[0, t + 1:] + 7) % 256
+        torch.testing.assert_close(m(y)[0, : t + 1], base[0, : t + 1])
+
+
+def test_wide_encoder_keeps_core_essential():
+    """Decoder must not see beyond its patch except through the core: with
+    the core output zeroed, changing bytes in an earlier patch must not
+    change predictions in a later patch (the wide encoder only feeds the core)."""
+    torch.manual_seed(4)
+    m = _wide().eval()
+    m.up.weight.data.zero_()                      # cut the core -> decoder path
+    x = torch.tensor([list(b"abcdefghijklmnopqrstuvwxyz012345abcdefghijklmnopqrstuvwxyz012345")])
+    y = x.clone(); y[0, 3] = ord("Z")             # patch 0
+    torch.testing.assert_close(m(y)[0, 8:], m(x)[0, 8:])
+
+
+def test_wide_encoder_patch_vector_sees_earlier_patches():
+    torch.manual_seed(5)
+    m = _wide().eval()
+    x = torch.tensor([list(b"abcdefghijklmnopqrstuvwxyz012345abcdefghijklmnopqrstuvwxyz012345")])
+    y = x.clone(); y[0, 3] = ord("Z")
+    seen = {}
+    m.blocks[0].register_forward_hook(lambda mod, inp, out: seen.__setitem__("g", inp[0].detach().clone()))
+    m(x); gx = seen["g"]; m(y); gy = seen["g"]
+    assert not torch.allclose(gx[0, 1], gy[0, 1])  # patch 1's vector depends on patch 0's bytes

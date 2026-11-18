@@ -120,7 +120,7 @@ class Hourglass(ByteLM):
                  enc: int = 2, dec: int = 2, kernel: int = 0, zloss: float = 1e-4,
                  qk_norm: bool = True, qkv_conv: int = 0, qat: QAT | dict | None = None,
                  byte_mix: str = "conv", byte_window: int = 64, byte_dh: int = 64,
-                 patching: str = "fixed"):
+                 patching: str = "fixed", enc_window: int = 0):
         """T: byte context (a multiple of k); the global stack sees T/k patches.
         byte_mix "conv": ByteBlocks (causal depthwise conv + MLP);
         "attn": transformer Blocks with sliding-window attention over the
@@ -134,7 +134,13 @@ class Hourglass(ByteLM):
         Both paths have the same width: the patch vector is built from the
         last k encoder states up to the patch end, and the upsample gives
         each later byte its own vector by offset from that end (clipped at
-        k-1), so on pure ASCII utf8 patching is exactly fixed patching."""
+        k-1), so on pure ASCII utf8 patching is exactly fixed patching.
+        enc_window > 0 (utf8/chars only): a wide encoder whose attention
+        spans the last enc_window bytes across patch boundaries, so a
+        patch vector can use the text before its patch. The decoder stays
+        patch-local, and its skip then comes from the byte embedding, not
+        the encoder: anything beyond the current patch still reaches the
+        decoder only through the core (no X21 shortcut)."""
         super().__init__()
         if T % k:
             raise ValueError(f"T={T} must be a multiple of k={k}")
@@ -158,6 +164,9 @@ class Hourglass(ByteLM):
         self.seg_window = k + 3 if patching == "utf8" else 4 * k
         self.dense_seg = False
         var = patching != "fixed"
+        if enc_window and not var:
+            raise ValueError("enc_window needs utf8/chars patching")
+        self.enc_window = enc_window
 
         def byte_block():
             if byte_mix == "conv":
@@ -168,7 +177,10 @@ class Hourglass(ByteLM):
 
         self.emb = nn.Embedding(256, d_b)
         nn.init.normal_(self.emb.weight, std=0.02)
-        self.enc = nn.ModuleList(byte_block() for _ in range(enc))
+        self.enc = nn.ModuleList(
+            Block(d_b, self.byte_H, n_res, qk_norm, 0, qat, window=enc_window) if enc_window
+            else byte_block()
+            for _ in range(enc))
         self.n_down = nn.RMSNorm(d_b)
         kd = k * d_b                            # k byte states per patch, both ways
         self.down = nn.Linear(kd, d, bias=False)
@@ -226,8 +238,12 @@ class Hourglass(ByteLM):
             else:                                             # patches are <= seg_window bytes
                 mask = (seg, self.seg_window)
         h = _q(qs, "emb", self.emb(x.long()))
+        skip = h if self.enc_window else None
+        emask = None if self.enc_window else mask         # wide: SDPA sliding-window band
         for blk in self.enc:
-            h = self._bblk(blk, h, mask)
+            h = self._bblk(blk, h, emask)
+        if skip is None:
+            skip = h
         if tap is not None:
             tap("emb", h)
         if slot is None:
@@ -256,7 +272,7 @@ class Hourglass(ByteLM):
             endp = torch.cummax(torch.where(slot >= 0, tt, -1), 1).values
             off = (tt - endp).clamp(max=k - 1)
             u = torch.gather(U, 1, (last * k + off)[..., None].expand(-1, -1, self.d_b))
-        h = h + u
+        h = skip + u
         for blk in self.dec:
             h = self._bblk(blk, h, mask)
         logits = F.linear(_q(qs, "nf", self.nf(h)), self.emb.weight).float()[:, :T0]
