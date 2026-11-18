@@ -151,6 +151,12 @@ class Hourglass(ByteLM):
         if patching != "fixed" and byte_mix != "patch":
             raise ValueError("utf8/chars patching needs byte_mix 'patch'")
         self.patching = patching
+        # longest patch of valid UTF-8: utf8 snaps a k-grid end forward by
+        # <= 3 bytes; chars holds k characters of <= 4 bytes. (Broken runs
+        # of lead bytes can be longer; the local band then drops their
+        # oldest keys, still causal.)
+        self.seg_window = k + 3 if patching == "utf8" else 4 * k
+        self.dense_seg = False
         var = patching != "fixed"
 
         def byte_block():
@@ -214,8 +220,11 @@ class Hourglass(ByteLM):
             slot = patch_ends(x, k, self.patching)            # [B, T], -1 = no end here
             end = slot >= 0
             seg = torch.cumsum(end.long(), 1) - end.long()    # patch index of each byte
-            tt = torch.arange(T, device=x.device)
-            mask = ((seg[:, :, None] == seg[:, None, :]) & (tt[None, :, None] >= tt[None, None, :]))[:, None]
+            if self.dense_seg:                                # reference path (tests)
+                tt = torch.arange(T, device=x.device)
+                mask = ((seg[:, :, None] == seg[:, None, :]) & (tt[None, :, None] >= tt[None, None, :]))[:, None]
+            else:                                             # patches are <= seg_window bytes
+                mask = (seg, self.seg_window)
         h = _q(qs, "emb", self.emb(x.long()))
         for blk in self.enc:
             h = self._bblk(blk, h, mask)

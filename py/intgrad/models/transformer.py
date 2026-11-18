@@ -205,7 +205,11 @@ class Block(nn.Module):
     def attend(self, q, k, v, mask=None):
         """Causal attention; explicit when scores or probabilities are
         quantized (SDPA never materializes them). mask: optional bool
-        [B, 1, T, T] (True = may attend), replacing the causal mask."""
+        [B, 1, T, T] (True = may attend), replacing the causal mask; or a
+        tuple (seg [B, T], W): attend only to earlier positions of the same
+        segment, all within the last W positions (local, O(T·W))."""
+        if isinstance(mask, tuple):
+            return self._attend_local(q, k, v, *mask)
         if mask is not None:
             return self._attend(q, k, v, mask)
         if self.patch:
@@ -236,6 +240,24 @@ class Block(nn.Module):
         if qat.probs:
             p = Q.act_fixed(p, Q.PROB_SCALE)
         return p @ v
+
+    def _attend_local(self, q, k, v, seg, W):
+        """Segment-causal attention over a band of the last W positions:
+        same result as the dense segment mask when no segment is longer
+        than W, at O(T·W) instead of O(T²)."""
+        qat = self.qat
+        win = lambda t: F.pad(t, (0, 0, W - 1, 0)).unfold(2, W, 1)       # [B, H, T, dh, W]
+        kw, vw = win(k), win(v)
+        sp = F.pad(seg, (W - 1, 0), value=-1).unfold(1, W, 1)            # [B, T, W]
+        ok = (sp == seg[..., None])[:, None]                             # [B, 1, T, W]
+        s = torch.einsum("bhtd,bhtdw->bhtw", q, kw) * (1.0 / math.sqrt(self.dh))
+        s = s.masked_fill(~ok, float("-inf"))
+        if qat.softmax == "maxrel":
+            s = Q.logit_maxrel(s).masked_fill(~ok, float("-inf"))
+        p = torch.softmax(s, -1)
+        if qat.probs:
+            p = Q.act_fixed(p, Q.PROB_SCALE)
+        return torch.einsum("bhtw,bhtdw->bhtd", p, vw)
 
     def forward(self, x, rope, tap: Tap | None = None, i: int = 0, mask=None):
         B, T, d = x.shape

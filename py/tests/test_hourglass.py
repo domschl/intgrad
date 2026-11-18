@@ -213,3 +213,32 @@ def test_utf8_model_on_ascii_equals_fixed_model():
     x = torch.tensor([list(b"plain ascii text, exactly fixed!")] * 2)
     torch.testing.assert_close(b(x), a(x), rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(b(x[:, :19]), a(x[:, :19]), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("patching", ["utf8", "chars"])
+def test_local_segment_attention_equals_dense(patching):
+    """The O(T·W) band path must match the dense segment mask, on text
+    mixing 1-4 byte characters and a window starting mid-character."""
+    torch.manual_seed(1)
+    m = Hourglass(d=64, L=2, H=2, T=64, k=4, d_b=32, byte_mix="patch", byte_dh=16, patching=patching).eval()
+    txt = "Grüße, 日本語のテキスト 😀🎉 naïve – ok".encode()
+    x = torch.tensor([list(txt[1:65].ljust(64, b" ")), list(txt[:64].ljust(64, b"."))])
+    fast = m(x)
+    m.dense_seg = True
+    torch.testing.assert_close(fast, m(x), rtol=1e-4, atol=1e-4)
+
+
+def test_patch_lengths_fit_segment_window():
+    """On valid UTF-8 (window starting at any offset, so also mid-character)
+    no patch exceeds the local attention window. Broken byte runs (lead
+    bytes without continuations) can exceed it; the band then only drops
+    older keys of that patch, which stays causal."""
+    from intgrad.models.hourglass import patch_ends
+    txt = ("Grüße aus Köln – 日本語のテキスト, 😀🎉 naïve ok. " * 12).encode()
+    for mode, k in [("utf8", 4), ("chars", 4), ("utf8", 2), ("chars", 2)]:
+        m = Hourglass(d=32, L=1, H=1, T=128, k=k, d_b=16, byte_mix="patch", byte_dh=16, patching=mode)
+        x = torch.tensor([list(txt[o:o + 128]) for o in range(8)])
+        end = patch_ends(x, k, mode) >= 0
+        seg = torch.cumsum(end.long(), 1) - end.long()
+        longest = max(int(torch.bincount(r).max()) for r in seg)
+        assert longest <= m.seg_window, (mode, k, longest)
