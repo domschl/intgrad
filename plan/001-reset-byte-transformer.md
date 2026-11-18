@@ -1097,6 +1097,28 @@ time. 12 GB is the hard limit. Core activations shrink by k and
 attention scores by k², which is headroom for a larger core and for plan
 002 state. ig-train now logs `peak_gib` with the final eval.
 
+**X22 — M6 round 3: patch-local byte path (2026-11-18).**
+`byte_mix = "patch"`, fp, seed 42, 300 MB. Peak VRAM is training only.
+
+| model | bpb | time | VRAM | global off |
+|---|---|---|---|---|
+| S-k4 patch | 1.994 | 7.1 min | 2.1 GB | +1.52 |
+| S-k4 patch, core L 8 | 1.969 | 9.8 min | 2.9 GB | |
+| S-k2 patch | 1.785 | 10.5 min | 2.9 GB | |
+| M-k4 patch | 1.916 | 13.1 min | 3.7 GB | +1.53 |
+
+Reference: flat S 1.668 (10.5 min, ~3 GB), flat M 1.580 (30 min).
+
+**The core now carries the model**: switching the global path off costs
+1.5 bpb, against 0.14–0.6 with the wider byte paths. **Core capacity now
+pays**: L 8 beats L 4, and M beats S by 0.08; in round 2 a deeper core was
+*worse*. The gap to flat is still large (M-k4 is +0.34 vs flat M, at half
+the time and ~half the VRAM), so the hourglass is now core-limited.
+Patch offset at S-k4: 1.995 / 2.004 / 2.029 / 1.958.
+
+Round 4 spends the VRAM headroom on the core: L-k4 patch, and an XL core
+(d 768, 12 layers).
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
