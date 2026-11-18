@@ -350,6 +350,14 @@ class ByteTransformer(nn.Module):
             return ce + self.zloss * torch.logsumexp(lg, -1).square().mean(), ce
         return ce, ce
 
+    def max_batch(self, cap: int = 64) -> int:
+        """Inference batch: explicit attention keeps <= 2^27 scores per tensor."""
+        b = cap
+        if self.qat.explicit_attn:
+            while b > 1 and b * self.H * self.T * self.T > 1 << 27:
+                b //= 2
+        return b
+
     @torch.no_grad()
     def chunk_bits(self, chunks: torch.Tensor, batch: int = 0) -> torch.Tensor:
         """Bits for chunks[:, 1:] (eval-v1 protocol). Sliding windows with
@@ -358,11 +366,7 @@ class ByteTransformer(nn.Module):
         its in-chunk context if it is within the first window)."""
         N, Lc = chunks.shape
         T, stride = self.T, self.T // 2
-        if not batch:                       # explicit attention: <= 2^27 scores per tensor
-            batch = 64
-            if self.qat.explicit_attn:
-                while batch > 1 and batch * self.H * T * T > 1 << 27:
-                    batch //= 2
+        batch = batch or self.max_batch()
         n_in = Lc - 1                                       # inputs 0..L-2
         if n_in <= T:
             starts = [0]
@@ -388,7 +392,12 @@ class ByteTransformer(nn.Module):
     @torch.no_grad()
     def sample(self, prompt: torch.Tensor, n: int, temp: float = 0.8,
                generator: torch.Generator | None = None) -> torch.Tensor:
-        """prompt [B, P] bytes -> [B, n] sampled continuation bytes."""
+        """prompt [B, P] bytes -> [B, n] sampled continuation bytes
+        (in batches of max_batch(), one shared generator)."""
+        mb = self.max_batch()
+        if len(prompt) > mb:
+            return torch.cat([self.sample(prompt[i:i + mb], n, temp, generator)
+                              for i in range(0, len(prompt), mb)])
         was = self.training
         self.eval()                       # frozen quantization scales
         x = prompt.long()

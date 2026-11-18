@@ -429,7 +429,13 @@ Gate: full-quant (a–d) within **0.10 bpb** of fp at S and M, and P1–P4
 pass quantized. If the gate fails, run a **sensitivity sweep** (quantize
 one tensor class at a time) before touching anything else.
 
-### M5 — Lion at transformer scale
+### M5 — Lion at transformer scale ✅
+Outcome: Lion is not a dead end. Neither criterion holds: fp and
+quantized Lion are stable up to L, and the quantization cost is ≤ 0.013
+bpb at S/M/L (X14, X19). The tuned defaults are unchanged (X16–X18):
+lr 3e-3, wd 3, betas (0.95, 0.98), batch 64, one lr for all groups.
+The controlling quantity is lr·wd ≈ 6–9e-3.
+
 Sweep lr × wd × β2 × batch on S (2 seeds at the optimum), per-group lr
 for embeddings/norms, and check stability at M/L. Lion counts as a
 **dead end** only if, after this sweep, (i) fp-Lion diverges or stalls at
@@ -920,6 +926,61 @@ S, 4000 steps, seed 42, at the X16 optimum (default 1.7514; noise
 The gains need their full lr (cf. X12: they must grow). Batch 64 stays;
 at a fixed byte budget, other batch sizes would need their own lr·wd
 retuning.
+
+**X18 — M5 round 3: lr_emb 0.3 at the ladder horizon (2026-11-18).**
+Quantized S (stage d), 9155 steps.
+
+| | s42 | s7 | mean |
+|---|---|---|---|
+| default | 1.6814 (X14) | 1.6783 | 1.6799 |
+| lr_emb 0.3 | 1.6794 | 1.6880 | 1.6837 |
+
+No gain; the X17 hint was noise. **The Lion defaults stand** for the
+quantized model: lr 3e-3, wd 3, betas (0.95, 0.98), batch 64, one lr
+for all groups.
+
+**X19 — M5 round 4: quantized L at the ladder horizon (2026-11-18).**
+Stage d, L (d512, 8 layers, T1024), batch 32 (micro-batch 8, 7.9 GiB),
+seed 42, against m3-ladder-L (fp).
+
+| step | 2000 | 4000 | 6000 | 8000 | 9155 |
+|---|---|---|---|---|---|
+| fp | 1.9627 | 1.8827 | 1.7736 | 1.6035 | 1.5364 |
+| quant | 1.9827 | 1.8977 | 1.7844 | 1.6132 | **1.5478 (+0.011)** |
+
+Training was stable throughout, at 46 kB/s (1.8 h). The quantization
+cost does not grow with scale:
+
+| | S | M | L |
+|---|---|---|---|
+| Δ vs fp | +0.013 | −0.004 | +0.011 |
+
+Post-training sampling hit OOM: 32 unbatched sequences with explicit
+attention at T1024. `sample()` now batches like `chunk_bits`
+(`max_batch`). P4 was rerun from the checkpoint with
+`runs/m5_sample.py`.
+
+**P4 at L quantized: 30/32 valid (93.75%), below the 99% bar.** The two
+failures:
+- a degenerate repeating loop in Hebrew text, with continuation bytes
+  where a lead byte belongs;
+- one stray continuation byte (0x82) inside ASCII.
+
+Teacher-forced on 64 val chunks (`runs/utf8_mass.py`), the probability
+mass on bytes that would break UTF-8 at T = 0.8 is the same for fp and
+quant:
+
+| run | invalid mass / byte | expected events per 1 KB |
+|---|---|---|
+| S fp | 1.45e-5 | 0.015 |
+| S quant | 7.9e-6 | 0.008 |
+| L fp | 7.8e-6 | 0.008 |
+| L quant | 8.4e-6 | 0.009 |
+
+So on real text quantization does not degrade UTF-8 structure. The
+failures come from free generation drifting into rare territory, and
+2/32 has a 95% CI of ≈ 1–21%. 96 more samples each from fp-L and
+quant-L decide it (pending).
 
 ## 9. Risks
 
