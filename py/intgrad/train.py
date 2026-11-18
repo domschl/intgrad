@@ -50,6 +50,29 @@ DEFAULTS = {
 }
 
 
+
+class _Peaks:
+    """Peak CUDA memory of training steps vs evaluation, tracked separately:
+    eval batches are sized by the model's attention (max_batch), so a
+    combined peak says little about what training needs."""
+
+    def __init__(self, dev):
+        self.cuda, self.dev, self.train, self.ev = dev.type == "cuda", dev, 0, 0
+
+    def eval(self, fn):
+        if not self.cuda:
+            return fn()
+        self.train = max(self.train, torch.cuda.max_memory_allocated(self.dev))
+        torch.cuda.reset_peak_memory_stats(self.dev)
+        r = fn()
+        self.ev = max(self.ev, torch.cuda.max_memory_allocated(self.dev))
+        torch.cuda.reset_peak_memory_stats(self.dev)
+        return r
+
+    @staticmethod
+    def gib(b):
+        return round(b / 2**30, 2)
+
 def merge(base: dict, over: dict) -> dict:
     out = dict(base)
     for k, v in over.items():
@@ -220,6 +243,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     log = open(run_dir / "metrics.jsonl", "a")
     t0, last = time.time(), {}
     end = min(t["steps"], t["stop"]) if t["stop"] else t["steps"]
+    peaks = _Peaks(dev)
     for step in range(start, end):
         lr = lr_at(step, t)
         for g in opt.param_groups:
@@ -258,16 +282,18 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             log.write(json.dumps({"step": step, "telemetry": tap.stats}) + "\n")
             log.flush()
         if t["eval_every"] and (step + 1) % t["eval_every"] == 0 and step + 1 < t["steps"]:
-            r = evaluate(model, ev, dev)
+            r = peaks.eval(lambda: evaluate(model, ev, dev))
             log.write(json.dumps({"step": step + 1, "eval": r}) + "\n")
             log.flush()
             print(f"step {step + 1}: val {r['bpb']:.4f} ± {r['se']:.4f}", flush=True)
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                 "batcher": batcher.state_dict(), "sr_gen": sr_gen.get_state(),
                 "step": end}, run_dir / "ckpt.pt")
-    final = evaluate(model, ev, dev) if t.get("final_eval", True) else {"bpb": float("nan"), "se": 0.0}
-    if dev.type == "cuda":                     # peak training VRAM (before sampling)
-        final["peak_gib"] = round(torch.cuda.max_memory_allocated(dev) / 2**30, 2)
+    final = peaks.eval(lambda: evaluate(model, ev, dev)) if t.get("final_eval", True) \
+        else {"bpb": float("nan"), "se": 0.0}
+    if dev.type == "cuda":                     # training and eval peaks kept apart (eval batch differs)
+        final["peak_gib"] = peaks.gib(peaks.train)
+        final["eval_peak_gib"] = peaks.gib(peaks.ev)
     log.write(json.dumps({"step": end, "eval": final, "final": end == t["steps"]}) + "\n")
     if t["samples"] and not is_mlp:
         g = torch.Generator(device=dev).manual_seed(t["seed"])
