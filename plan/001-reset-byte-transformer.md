@@ -1021,6 +1021,41 @@ failures come from free generation drifting into rare territory, and
 2/32 has a 95% CI of ≈ 1–21%. 96 more samples each from fp-L and
 quant-L decide it (pending).
 
+**X20 — M6 round 1: hourglass vs flat, fp (2026-11-18).** Same
+32 KB/step and 300 MB as the m3-ladder, seed 42. Byte path: 2 + 2 conv
+ByteBlocks (kernel 4), byte width d/2. The core is the flat preset of the
+same name.
+
+| model | bpb | train time | UTF-8 |
+|---|---|---|---|
+| flat S / M / L | 1.668 / 1.580 / 1.536 | 10.5 / 30 / 59 min | 32/32 |
+| hourglass S-k2 (T 1024) | 1.766 | 9.3 min | 32/32 |
+| hourglass S-k4 (T 2048) | 1.896 | 5.2 min | 32/32 |
+| hourglass M-k4 | 1.839 | 10.8 min | 31/32 |
+| hourglass L-k4 | 1.824 | 18.8 min | 32/32 |
+
+The hourglass is worse at equal time, as the user expected with a small
+core. But scaling the core S→L (7× parameters) gains only 0.07 bpb,
+against 0.13 for flat. Diagnostic (`runs/m6_offset.py`, 256 val chunks):
+bpb by input position inside the patch, t mod k.
+
+| model | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| flat S | 1.672 | 1.669 | 1.672 | 1.675 |
+| S-k4 | 1.887 | 1.905 | 1.931 | 1.872 |
+| L-k4 | 1.814 | 1.831 | 1.850 | 1.814 |
+
+At t mod 4 = 3 the patch vector is freshest (it covers byte t). Staleness
+inside a patch costs ~0.06, but even the freshest position is 0.14–0.2
+behind flat. The loss is in the patch representation, not in the
+decoder's timing. The prime suspect is the conv-only byte path
+(receptive field ≈ 7 bytes, no attention) acting as a weak "tokenizer";
+published hourglass models use attention at byte level.
+
+Round 2 tests both explanations at S: byte blocks with sliding-window
+attention (window 64, `model.byte_mix = "attn"`) vs a deeper core (L 8),
+and both together.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).

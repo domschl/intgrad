@@ -13,12 +13,13 @@ def tiny(k=4, **kw):
     return Hourglass(d=32, L=2, H=2, T=32, k=k, d_b=16, qkv_conv=3, **kw)
 
 
+@pytest.mark.parametrize("mix", ["conv", "attn"])
 @pytest.mark.parametrize("k", [1, 2, 4])
 @pytest.mark.parametrize("t", [0, 3, 4, 7, 13, 30])
-def test_causal_at_every_offset(k, t):
+def test_causal_at_every_offset(k, t, mix):
     """Changing bytes after position t never changes logits at <= t, for
     t at patch starts, inside patches and at patch ends."""
-    m = tiny(k)
+    m = tiny(k, byte_mix=mix, byte_window=8, byte_dh=8)
     x = torch.randint(0, 256, (2, 32))
     x2 = x.clone()
     x2[:, t + 1:] = (x2[:, t + 1:] + 1 + torch.randint(0, 200, x2[:, t + 1:].shape)) % 256
@@ -102,3 +103,17 @@ def test_train_entry_point(tmp_path):
         pytest.skip("private corpus not present")
     train.run(cfg, out_root=tmp_path)
     assert (tmp_path / "hg-s42" / "ckpt.pt").exists()
+
+
+def test_sliding_window_limits_the_byte_path():
+    """With byte attention of window 4 and no global path reaching it, a
+    byte influences only the next 3 + 3 positions (enc + dec windows)."""
+    from intgrad.models.transformer import Block
+    torch.manual_seed(0)
+    blk = Block(16, 2, 1, window=4)
+    from intgrad.models.transformer import rope_cache
+    x = torch.randn(1, 32, 16)
+    x2 = x.clone(); x2[0, 5] += 1.0
+    with torch.no_grad():
+        d = (blk(x, rope_cache(32, 8, "cpu")) - blk(x2, rope_cache(32, 8, "cpu"))).abs().amax(-1)[0]
+    assert d[:5].max() == 0 and d[5:9].min() > 0 and d[9:].max() == 0

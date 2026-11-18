@@ -174,9 +174,12 @@ class QAT:
 
 class Block(nn.Module):
     def __init__(self, d: int, H: int, L: int, qk_norm: bool = True,
-                 qkv_conv: int = 0, qat: QAT = QAT()):
+                 qkv_conv: int = 0, qat: QAT = QAT(), window: int = 0):
+        """window > 0: sliding-window causal attention (each position sees
+        the last `window` positions, itself included); 0 = full causal."""
         super().__init__()
         self.qat = qat
+        self.window = window
         self.qs = _sites("n1 q k v attn n2 up mlp", qat.acts)
         self.rs = _sites("r1 r2", qat.resid == "q8")
         self.H, self.dh = H, d // H
@@ -201,10 +204,18 @@ class Block(nn.Module):
         """Causal attention; explicit when scores or probabilities are
         quantized (SDPA never materializes them)."""
         qat = self.qat
-        if not qat.explicit_attn:
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
         T = q.shape[-2]
-        causal = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
+        causal = None
+        if self.window:
+            i = torch.arange(T, device=q.device)
+            dist = i[:, None] - i[None, :]
+            causal = (dist >= 0) & (dist < self.window)
+        if not qat.explicit_attn:
+            if causal is None:
+                return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=causal)
+        if causal is None:
+            causal = torch.ones(T, T, dtype=torch.bool, device=q.device).tril()
         s = (q @ k.transpose(-1, -2)) * (1.0 / math.sqrt(self.dh))
         s = s.masked_fill(~causal, float("-inf"))
         if qat.softmax == "maxrel":
