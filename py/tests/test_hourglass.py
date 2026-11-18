@@ -130,3 +130,73 @@ def test_patch_local_byte_path_forces_the_core():
     with torch.no_grad():
         d = (m(x) - m(x2)).abs().amax(-1)[0]
     assert d[:9].max() == 0 and d[9:12].min() > 0 and d[12:].max() == 0
+
+
+# ------------------------------------------------------------- UTF-8 patching
+
+from intgrad.models.hourglass import patch_ends, utf8_complete
+
+CHARS = ["a", "b", " ", "é", "ß", "€", "中", "ה", "😀"]       # 1, 2, 3, 4 bytes
+
+
+def utf8_text(n_bytes: int, seed: int) -> torch.Tensor:
+    g = torch.Generator().manual_seed(seed)
+    out = b""
+    while len(out) < n_bytes:
+        out += CHARS[torch.randint(0, len(CHARS), (1,), generator=g).item()].encode()
+    return torch.tensor(list(out[:n_bytes]))
+
+
+def test_utf8_complete_is_causal_and_exact():
+    s = "aé€😀".encode()                                   # ends at 0, 2, 5, 9
+    assert utf8_complete(torch.tensor([list(s)]))[0].nonzero().flatten().tolist() == [0, 2, 5, 9]
+    stray = torch.tensor([[0xA9, 0x41, 0xC3, 0x41, 0xC3, 0xA9]])   # stray cont, broken lead
+    assert utf8_complete(stray)[0].tolist() == [True, True, False, True, False, True]
+    x = utf8_text(64, 0)[None]
+    full = utf8_complete(x)
+    for t in range(64):                                       # no look-ahead
+        assert torch.equal(utf8_complete(x[:, :t + 1])[0], full[0, :t + 1])
+
+
+@pytest.mark.parametrize("mode", ["utf8", "chars"])
+def test_patches_never_split_a_character(mode):
+    x = utf8_text(256, 1)[None]
+    slot = patch_ends(x, 4, mode)[0]
+    comp = utf8_complete(x)[0]
+    ends = (slot >= 0).nonzero().flatten()
+    assert comp[ends].all()                                   # every patch ends a character
+    s = slot[slot >= 0]
+    assert torch.equal(s, s.sort().values) and len(s.unique()) == len(s)
+    assert s.max() < 256 // 4
+
+
+def test_utf8_patching_on_ascii_is_fixed_patching():
+    x = torch.tensor([list(b"plain ascii text, exactly fixed!")])
+    assert torch.equal(patch_ends(x, 4, "utf8"), patch_ends(x, 4, "fixed"))
+
+
+@pytest.mark.parametrize("mode", ["utf8", "chars"])
+@pytest.mark.parametrize("seed", [2, 7])
+def test_utf8_patching_is_causal(mode, seed):
+    """Every split point t: a different future never changes logits <= t."""
+    torch.manual_seed(0)
+    m = Hourglass(d=32, L=2, H=2, T=32, k=4, d_b=16, byte_mix="patch", byte_dh=8, patching=mode)
+    x = utf8_text(32, seed)[None]
+    with torch.no_grad():
+        a = m(x)
+        for t in range(31):
+            x2 = x.clone()
+            x2[:, t + 1:] = (x2[:, t + 1:] + 1 + torch.randint(0, 250, (1, 31 - t))) % 256
+            b = m(x2)
+            assert torch.equal(a[:, :t + 1], b[:, :t + 1]), t
+
+
+@pytest.mark.parametrize("mode", ["utf8", "chars"])
+def test_utf8_patching_trains_and_scores(mode):
+    torch.manual_seed(0)
+    m = Hourglass(d=32, L=2, H=2, T=32, k=4, d_b=16, byte_mix="patch", byte_dh=8, patching=mode)
+    x = utf8_text(32, 4)[None]
+    loss, _ = m.loss(m(x), x)
+    loss.backward()
+    assert all(p.grad is not None for p in m.parameters())
+    assert m.chunk_bits(utf8_text(70, 5)[None]).shape == (1, 69)

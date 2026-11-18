@@ -497,6 +497,25 @@ Rounds:
 Learned chunking (H-Net) stays a later research item. The choice made
 here is the architecture M7 measures and plan 002 builds on.
 
+**Patch boundaries are language-agnostic (user decision, 2026-11-18).**
+No word or space boundaries: they do not carry over to many scripts, and
+they reintroduce tokenizer-like decisions. The only structural rule is
+**never split a UTF-8 character** (`model.patching`):
+- `utf8`: the k-byte grid, with each patch end snapped forward to the next
+  character end. ASCII gives exactly the fixed patches; there are at most
+  T/k patches.
+- `chars`: k complete characters per patch, which evens out information
+  per patch across scripts.
+
+"Character complete" is decided from past bytes only: the lead byte
+announces the length. Stray continuation bytes (a window starting
+mid-character, broken text) count as 1-byte characters. The patch vector
+is the encoder state of the patch's last byte, and byte attention is
+masked to the patch segment. Causality is tested at every split point and
+mutation-checked: a decoder that sees a patch one byte early fails.
+Learned or entropy boundaries (BLT/H-Net) remain later options, still
+constrained to character ends.
+
 ### M7 — Recurrence readiness (hand-off to plan 002)
 Using the sequential batcher, measure the non-recurrent model's
 **position curve** and **cross-window loss**: the bpb of the first 64 bytes

@@ -202,9 +202,12 @@ class Block(nn.Module):
         for lin in (self.o, self.down):                   # residual branches
             nn.init.normal_(lin.weight, std=0.02 / math.sqrt(2 * L))
 
-    def attend(self, q, k, v):
+    def attend(self, q, k, v, mask=None):
         """Causal attention; explicit when scores or probabilities are
-        quantized (SDPA never materializes them)."""
+        quantized (SDPA never materializes them). mask: optional bool
+        [B, 1, T, T] (True = may attend), replacing the causal mask."""
+        if mask is not None:
+            return self._attend(q, k, v, mask)
         if self.patch:
             B, H, T, dh = q.shape
             p = self.patch
@@ -212,10 +215,9 @@ class Block(nn.Module):
             return self._attend(blk(q), blk(k), blk(v)).reshape(B, H, T, dh)
         return self._attend(q, k, v)
 
-    def _attend(self, q, k, v):
+    def _attend(self, q, k, v, causal=None):
         qat = self.qat
         T = q.shape[-2]
-        causal = None
         if self.window:
             i = torch.arange(T, device=q.device)
             dist = i[:, None] - i[None, :]
@@ -235,7 +237,7 @@ class Block(nn.Module):
             p = Q.act_fixed(p, Q.PROB_SCALE)
         return p @ v
 
-    def forward(self, x, rope, tap: Tap | None = None, i: int = 0):
+    def forward(self, x, rope, tap: Tap | None = None, i: int = 0, mask=None):
         B, T, d = x.shape
         qs, rs = self.qs, self.rs
         h = _q(qs, "n1", self.n1(x))
@@ -247,7 +249,7 @@ class Block(nn.Module):
             q, k = self.q_norm(q), self.k_norm(k)
         q, k = apply_rope(q, *rope), apply_rope(k, *rope)
         q, k, v = _q(qs, "q", q), _q(qs, "k", k), _q(qs, "v", v)
-        a = _q(qs, "attn", self.attend(q, k, v).transpose(1, 2).reshape(B, T, d))
+        a = _q(qs, "attn", self.attend(q, k, v, mask).transpose(1, 2).reshape(B, T, d))
         if tap is not None:
             tap(f"norm{i}.attn_in", h)
             tap(f"q{i}", q)

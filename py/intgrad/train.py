@@ -77,7 +77,7 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
         if m.get("arch", "flat") == "hourglass":     # M6
             kw = {k: m[k] for k in ("d", "L", "H", "T", "k", "d_b", "enc", "dec", "kernel",
                                     "zloss", "qk_norm", "qkv_conv", "byte_mix", "byte_window",
-                                    "byte_dh") if k in m}
+                                    "byte_dh", "patching") if k in m}
             model = hourglass.build(m.get("preset"), qat=qat, **kw)
         else:
             kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
