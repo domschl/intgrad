@@ -1138,6 +1138,22 @@ Patch offset at S-k4: 1.995 / 2.004 / 2.029 / 1.958.
 Round 4 spends the VRAM headroom on the core: L-k4 patch, and an XL core
 (d 768, 12 layers).
 
+**X23 — M6 round 4: core size with the patch-local byte path (2026-11-18).**
+k 4, fixed patches, fp, seed 42, 300 MB.
+
+| core | bpb | time | peak VRAM | params |
+|---|---|---|---|---|
+| S (d256 L4) | 1.994 | 7.1 min | 2.1 GB | 4.0 M |
+| M (d384 L6) | 1.916 | 13.1 min | 3.7 GB | ~12 M |
+| L (d512 L8) | **1.847** | 21.8 min | 5.7 GB | ~28 M |
+| XL (d768 L12, d_b 256) | 1.879 | 43.7 min | 9.8 GB | 89.8 M |
+
+The core scales up to L (−0.07 to −0.08 per step); XL is worse. 300 MB
+is only 75 M patches for 90 M parameters (data-starved), and lr 3e-3 was
+tuned at S. Compared with flat M (1.580, 30 min) the gap is still 0.27
+bpb. The open levers are patch boundaries (round 5), training length,
+and lr at large width.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
