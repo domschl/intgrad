@@ -377,12 +377,16 @@ class ByteTransformer(ByteLM):
     def __init__(self, d: int, L: int, H: int, T: int, zloss: float = 1e-4,
                  softcap: float = 0.0, qk_norm: bool = True,
                  stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0,
-                 logit_quant: str = "none", qat: QAT | dict | None = None):
+                 logit_quant: str = "none", qat: QAT | dict | None = None,
+                 rec: str = "none", rec_conv: int = 4, rec_chunk: int = 32):
         """stem "embed": tied 256 x d embedding / output head (baseline).
         stem "conv": 256 x stem_dim embedding -> causal conv stem_dim -> d
         (kernel 4) -> + causal depthwise conv (kernel 4, dilation 2) on
         GELU(h); receptive field 7 bytes; untied d -> 256 output head.
-        qkv_conv k > 0: Primer-style causal depthwise conv on q, k, v."""
+        qkv_conv k > 0: Primer-style causal depthwise conv on q, k, v.
+        rec "lru" (plan 002): a gated diagonal linear recurrence after every
+        block (models/recurrent.py); its state is carried across windows
+        through forward_state."""
         super().__init__()
         self.d, self.L, self.H, self.T = d, L, H, T
         self.zloss, self.softcap, self.stem = zloss, softcap, stem
@@ -409,6 +413,12 @@ class ByteTransformer(ByteLM):
         else:
             raise ValueError(f"unknown stem {stem!r}")
         self.blocks = nn.ModuleList(Block(d, H, L, qk_norm, qkv_conv, qat) for _ in range(L))
+        if rec not in ("none", "lru"):
+            raise ValueError(f"rec {rec!r}")
+        self.rec = rec
+        if rec != "none":
+            from intgrad.models.recurrent import RecMix
+            self.recs = nn.ModuleList(RecMix(d, L, conv=rec_conv, chunk=rec_chunk) for _ in range(L))
         self.nf = nn.RMSNorm(d)
         self._rope = None
 
@@ -436,10 +446,20 @@ class ByteTransformer(ByteLM):
 
     def forward(self, x: torch.Tensor, tap: Tap | None = None,
                 mid_hook=None) -> torch.Tensor:
-        """x: [B, T] bytes -> logits [B, T, 256] (float32).
-        mid_hook(h_mid) -> h_mid' may read or replace the mid-stack latent
-        [B, T, d] (plan 002: recurrence, memory)."""
+        """x: [B, T] bytes -> logits [B, T, 256] (float32), from a fresh
+        (zero) recurrent state. mid_hook(h_mid) -> h_mid' may read or
+        replace the mid-stack latent [B, T, d]."""
+        return self.forward_state(x, None, None, tap, mid_hook)[0]
+
+    def forward_state(self, x: torch.Tensor, state: list | None = None,
+                      reset: torch.Tensor | None = None, tap: Tap | None = None,
+                      mid_hook=None) -> tuple[torch.Tensor, list | None]:
+        """Like forward, with the recurrent state carried in and out:
+        state = per-layer [B, d_rec] (None = zeros); reset [B, T] bool marks
+        document starts (the carried state is dropped there). Returns
+        (logits, new state); the new state is None without recurrence."""
         h = _q(self.qs, "emb", self.embed(x))
+        new = [] if self.rec != "none" else None
         if tap is not None:
             tap("emb", h)
         rope = self.rope(x.device)
@@ -450,6 +470,9 @@ class ByteTransformer(ByteLM):
                 if mid_hook is not None:
                     h = mid_hook(h)
             h = blk(h, rope, tap, i)
+            if new is not None:
+                h, s = self.recs[i](h, None if state is None else state[i], reset)
+                new.append(s)
         logits = F.linear(_q(self.qs, "nf", self.nf(h)), self.head_weight()).float()
         if self.softcap > 0:
             logits = self.softcap * torch.tanh(logits / self.softcap)
@@ -462,7 +485,7 @@ class ByteTransformer(ByteLM):
             tap.rel("logits", logits)
             for name, p in self.named_parameters():
                 tap(f"w.{name}", p)
-        return logits
+        return logits, new
 
 
 def build(preset: str | None = None, **kw) -> ByteTransformer:

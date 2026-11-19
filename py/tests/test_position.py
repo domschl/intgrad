@@ -65,3 +65,23 @@ def test_continuation_excludes_doc_starts():
     res, _ = measure(m, x, st, W=W, batch=4, device="cpu")
     cw = res["cross_window"]
     assert cw["cold"]["n"] == 2 and cw["doc_start"]["n"] == 1
+
+
+def test_carried_scores_windows_in_stream_order(corpus):  # noqa: F811
+    """Recurrent model: 'carried' equals scoring each stream's windows one
+    after another with the state handed over (and differs from cold)."""
+    S, n = 2, 3
+    x, st = stream_windows(corpus, data.VAL, streams=S, T=T, n=n, seed=3)
+    torch.manual_seed(0)
+    m = ByteTransformer(d=32, L=1, H=2, T=T, rec="lru", rec_chunk=8).eval()
+    res, _ = measure(m, x, st, W=W, batch=1, device="cpu")
+    tot = []
+    for s in range(S):
+        state = None
+        for j in range(n + 1):
+            xb = torch.from_numpy(x[s, j][None].copy())
+            lg, state = m.forward_state(xb[:, :-1], state, torch.from_numpy(st[s, j, :-1][None].copy()))
+            if j:
+                tot.append(torch.nn.functional.cross_entropy(lg[0], xb[0, 1:].long()).item() / np.log(2))
+    assert abs(np.mean(tot) - res["bpb_carried"]["bpb"]) < 6e-5
+    assert res["bpb_carried"]["bpb"] != res["bpb"]["bpb"]

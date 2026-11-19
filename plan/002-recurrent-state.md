@@ -148,6 +148,15 @@ needs its own grid. Range telemetry of h, a_t and the gates.
 - **Pure-PyTorch scan speed:** a chunked scan at T = 1024 may be slow; a
   kernel is then an engineering step, not a design change.
 
+- **Reset is a state reset, not a document mask.** At `doc_start` the
+  recurrent state is dropped, but attention inside the window still sees
+  the bytes before the document start (as in the base, which trained on
+  windows that cross documents). So in a multi-layer model, information
+  from an earlier window can still reach a later layer through attention to
+  pre-reset positions. If that matters, document-masked attention is the
+  fix; the cross-window metric uses continuation windows only and is not
+  affected.
+
 ## 8. Experiment log
 
 *(empty)*

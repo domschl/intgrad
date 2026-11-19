@@ -45,6 +45,7 @@ DEFAULTS = {
               "micro_batch": 0,  # >0: gradient accumulation over micro-batches
               "norm_wd": 0.0, "conv_decay": "zero",
               "lr_emb": 1.0, "lr_vec": 1.0,  # lr multipliers: embedding/head, gains
+              "rec_carry": True,  # plan 002: hand the recurrent state to the next window
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1",
              "batcher": "random"},  # "sequential": B document-continuous streams (plan 002)
@@ -106,7 +107,8 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
             model = hourglass.build(m.get("preset"), qat=qat, **kw)
         else:
             kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
-                                    "stem", "stem_dim", "qkv_conv", "logit_quant") if k in m}
+                                    "stem", "stem_dim", "qkv_conv", "logit_quant",
+                                    "rec", "rec_conv", "rec_chunk") if k in m}
             model = transformer.build(m.get("preset"), qat=qat, **kw)
         for p in model.parameters():          # weights start on their grid
             qc.project_(p)
@@ -231,6 +233,9 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     ctx = context_len(cfg, model)
     is_mlp = cfg_is_mlp(model)
     fwd = torch.compile(model) if t["compile"] else model
+    rec = getattr(model, "rec", "none") != "none"      # plan 002 recurrent branch
+    fwd_state = (torch.compile(model.forward_state) if t["compile"] else model.forward_state) if rec else None
+    rstate = None                                      # per-layer [B, d_rec], carried across steps
     kind = cfg["data"]["batcher"]
     if kind not in ("random", "sequential"):
         raise ValueError(f"data.batcher {kind!r}")
@@ -245,6 +250,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
         batcher.load_state_dict(ck["batcher"])
         sr_gen.set_state(ck["sr_gen"])
         start = ck["step"]
+        rstate = ck.get("rec_state")
 
     log = open(run_dir / "metrics.jsonl", "a")
     t0, last = time.time(), {}
@@ -267,11 +273,22 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             if len(x) % mb:
                 raise ValueError("train.batch must be a multiple of train.micro_batch")
             loss = ce = 0.0
+            carry = rec and kind == "sequential" and t["rec_carry"]
+            reset = torch.from_numpy(b.doc_start).to(dev) if rec and b.doc_start is not None else None
+            new_state = []
             for i in range(0, len(x), mb):
-                li, ci = model.loss(fwd(x[i:i + mb]), y[i:i + mb])
+                if rec:
+                    s_in = [s[i:i + mb] for s in rstate] if carry and rstate is not None else None
+                    lg, s_out = fwd_state(x[i:i + mb], s_in, None if reset is None else reset[i:i + mb])
+                    new_state.append([s.detach() for s in s_out])
+                else:
+                    lg = fwd(x[i:i + mb])
+                li, ci = model.loss(lg, y[i:i + mb])
                 (li * (mb / len(x))).backward()        # mean over the full batch
                 loss = loss + li.detach() * (mb / len(x))
                 ce = ce + ci.detach() * (mb / len(x))
+            if rec and carry:                          # gradient cut at the window edge (k = 1)
+                rstate = [torch.cat(ss) for ss in zip(*new_state)]
         opt.step()
         if step % t["log_every"] == 0 or step == end - 1:
             el = time.time() - t0
@@ -293,7 +310,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             log.flush()
             print(f"step {step + 1}: val {r['bpb']:.4f} ± {r['se']:.4f}", flush=True)
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
-                "batcher": batcher.state_dict(), "sr_gen": sr_gen.get_state(),
+                "batcher": batcher.state_dict(), "sr_gen": sr_gen.get_state(), "rec_state": rstate,
                 "step": end}, run_dir / "ckpt.pt")
     final = peaks.eval(lambda: evaluate(model, ev, dev)) if t.get("final_eval", True) \
         else {"bpb": float("nan"), "se": 0.0}

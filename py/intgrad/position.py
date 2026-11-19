@@ -14,6 +14,9 @@ cross-window    for continuation windows (the first W bytes lie in a doc
                        previous window could at best recover)
                 and, for reference, the first W bytes of windows whose
                 first byte starts a document (a true cold start).
+carried         (recurrent models, plan 002) the same windows scored in
+                stream order with the recurrent state handed from each
+                window to the next; "closed" = (cold - carried) / gap.
 
   uv run python -m intgrad.position runs/<run> [--streams 128] [--windows 32]
 """
@@ -45,6 +48,25 @@ def stream_windows(index: data.Index, bucket: int, streams: int, T: int, n: int,
         xs.append(np.concatenate([b.x, b.y[:, -1:]], 1))
         st.append(np.concatenate([b.doc_start, np.zeros((streams, 1), bool)], 1))
     return np.stack(xs, 1), np.stack(st, 1)
+
+
+@torch.no_grad()
+def carried_bits(model, x: torch.Tensor, st: torch.Tensor, batch: int) -> torch.Tensor:
+    """Windows of each stream in order, the recurrent state handed from one
+    to the next (reset at document starts). x [S, n+1, T+1] -> bits
+    [S, n, T] for windows 1..n (window 0 only builds the state)."""
+    S, n1, T1 = x.shape
+    out = torch.empty(S, n1 - 1, T1 - 1, device=x.device)
+    for i in range(0, S, batch):
+        state = None
+        for j in range(n1):
+            xb = x[i:i + batch, j]
+            lg, state = model.forward_state(xb[:, :-1], state, st[i:i + batch, j, :-1])
+            if j:
+                out[i:i + batch, j - 1] = F.cross_entropy(
+                    lg.float().reshape(-1, 256), xb[:, 1:].reshape(-1).long(),
+                    reduction="none").view(len(xb), -1) / math.log(2)
+    return out
 
 
 @torch.no_grad()
@@ -83,6 +105,10 @@ def measure(model, x: np.ndarray, st: np.ndarray, W: int = W_DEFAULT, batch: int
     # warm: last T-W inputs of window j-1, then the first W(+1) bytes of window j
     warm_x = torch.cat([xt[:, :-1, W:T], xt[:, 1:, :W + 1]], 2).reshape(-1, T1)
     warm = window_bits(model, warm_x, batch).view(S, n1 - 1, T)[..., T - W:]
+    rec = getattr(model, "rec", "none") != "none"
+    if rec:
+        carried = carried_bits(model, xt, torch.from_numpy(np.ascontiguousarray(st)).to(device),
+                               batch).double().cpu().numpy()
     cold, warm = cold.double().cpu().numpy(), warm.double().cpu().numpy()
     stw, xw = st[:, 1:], x[:, 1:]
     # continuation: no doc starts and no EOD among the first W inputs/targets
@@ -102,6 +128,13 @@ def measure(model, x: np.ndarray, st: np.ndarray, W: int = W_DEFAULT, batch: int
             "doc_start": _mean_se(cold[..., :W][start].mean(-1)) if start.any() else None,
         },
     }
+    if rec:                                  # plan 002: the state carried from the previous window
+        cw = res["cross_window"]
+        cw["carried"] = _mean_se(carried[..., :W][cont].mean(-1))
+        cw["closed"] = round((cw["cold"]["bpb"] - cw["carried"]["bpb"]) / max(cw["gap"]["bpb"], 1e-9), 4)
+        res["bpb_carried"] = _mean_se(carried.reshape(-1, T).mean(1))
+        res["position_carried"] = [{"lo": lo, "hi": hi, "bpb": round(float(carried.reshape(-1, T)[:, lo:hi].mean()), 4)}
+                                   for lo, hi in _bins(T)]
     model.train()
     return res, curve
 
@@ -138,6 +171,11 @@ def main():
           f"cold {cw['cold']['bpb']:.4f}, warm {cw['warm']['bpb']:.4f}, gap {cw['gap']['bpb']:.4f}"
           f" ± {cw['gap']['se']:.4f} (n {cw['gap']['n']})")
     print("  position: " + "  ".join(f"[{p['lo']},{p['hi']}) {p['bpb']:.3f}" for p in res["position"]))
+    if "carried" in cw:
+        print(f"  carried state: window bpb {res['bpb_carried']['bpb']:.4f}, first {a.W} B "
+              f"{cw['carried']['bpb']:.4f}, gap closed {100 * cw['closed']:.1f}%")
+        print("  position (carried): " + "  ".join(f"[{p['lo']},{p['hi']}) {p['bpb']:.3f}"
+                                                 for p in res["position_carried"]))
 
 
 if __name__ == "__main__":

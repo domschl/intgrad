@@ -11,12 +11,16 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 
 
 @need
-@pytest.mark.parametrize("quant,batcher", [(True, "random"), (False, "random"),
-                                           (False, "sequential")])
-def test_resume_is_bit_exact(tmp_path, quant, batcher):
+@pytest.mark.parametrize("quant,batcher,rec", [(True, "random", False), (False, "random", False),
+                                               (False, "sequential", False), (False, "sequential", True)])
+def test_resume_is_bit_exact(tmp_path, quant, batcher, rec):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"]["batcher"] = batcher
-    cfg["model"].update(ctx=3, hidden=16)
+    if rec:                                    # plan 002: carried recurrent state survives resume
+        cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
+                        "rec_chunk": 8}
+    else:
+        cfg["model"].update(ctx=3, hidden=16)
     cfg["quant"]["enabled"] = quant
     cfg["quant"]["w2_sr"] = quant              # exercise the SR generator too
     cfg["train"].update(steps=40, batch=8, warmup=5, device="cpu", log_every=10,
