@@ -1338,6 +1338,33 @@ L core, utf8, lr 7.5e-4, wd 3, 300 MB; one change per run against 1.765.
   this scale VRAM does not bind (flat L trains in 3.3 GiB). The hourglass
   may return where compute per position binds, e.g. a recurrent core.
 
+**X30 — M6 round 11, the last M6 round (2026-11-19).** Same setting as X29.
+
+| run | change | bpb | wiki-en | wiki-de | books | wall time |
+|---|---|---|---|---|---|---|
+| baseline | enc 2, dec 2, d_b 256 | 1.765 | 1.720 | 1.833 | 1.754 | 23.5 min |
+| embskip | patch-local encoder, decoder skip from the embedding | 2.050 | 2.074 | 2.229 | 1.969 | 24.0 min |
+| encwide64 | local encoder (skip) + 2 wide layers into down, window 64 | 1.789 | 1.750 | 1.872 | 1.770 | 35.5 min |
+| encwide256 | same, window 256 | 1.803 | 1.769 | 1.892 | 1.779 | 35.2 min |
+| dec8 | 8 decoder layers (micro-batch 4) | 1.724 | 1.684 | 1.775 | 1.715 | 34.6 min |
+| db512 | d_b 512 (micro-batch 4) | 1.768 | 1.735 | 1.844 | 1.748 | 37.4 min |
+| k2 (X29) | patches of 2 bytes | 1.605 | 1.551 | 1.632 | 1.612 | 39.1 min |
+| k2-dec4 | k2 + 4 decoder layers (micro-batch 8) | 1.607 | 1.550 | 1.636 | 1.615 | 43.4 min |
+
+- **The decoder skip carries most of the byte path.** Moving it from the
+  encoder output to the embedding costs 0.285. Against that control, the
+  all-wide encoder of X29 recovers 0.12–0.15: wide context helps the patch
+  vector only when the decoder has nothing better.
+- **Wide context on top of a local encoder does not help** (+0.024 at 64,
+  +0.038 at 256). The core already supplies the earlier text.
+- **Decoder depth helps a little at k4** (dec4 −0.011, dec8 −0.041) and not
+  at all at k2 (k2-dec4 ±0). Width (d_b 512) does nothing.
+- **Stop rule (X29) not met.** The best hourglass, k2 at 1.605 in 39 min,
+  would reach about 1.57 at flat L's 59 min (0.06 per doubling of data),
+  about 0.045 behind flat L (1.525). **M6 is shelved; flat L is the M7
+  base**, after the sweep in `runs/m7a.sh` (lr 1e-3 and 7.5e-4; wd 1 and 6;
+  betas 0.9/0.99; warmup 1000).
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
