@@ -17,10 +17,10 @@ Success is measured against the M7 baseline (plan 001 X33):
 
 | measure (M7 base, flat L, 1024-byte windows) | bpb |
 |---|---|
-| eval-v1 | 1.487 |
+| eval-v1 (2 seeds) | 1.486 (1.487, 1.486) |
 | first 64 bytes of continuation windows, cold | 1.863 |
 | the same bytes with the previous 960 bytes as context (warm) | 1.399 |
-| **cross-window gap** | **0.463 ± 0.005** |
+| **cross-window gap** | **0.463 ± 0.005** (seed 43: 0.464) |
 
 A recurrent state **works** if it closes a clear share of the gap (target:
 ≥ 50%, i.e. cold ≤ 1.63) without making eval-v1 worse. eval-v1 scores

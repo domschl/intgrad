@@ -1408,7 +1408,9 @@ one change per run against lr 1.5e-3, wd 3, betas 0.95/0.98, warmup 300
   warmup 1000, betas 0.95/0.98, micro-batch 16, 300 MB): 1.487.
 - Tuning gain over M3's L is 0.049 (1.536 → 1.487). Single steps are
   below 0.05, so they are configuration choices, not claims (§4.5 rule 3).
-  A second seed of the base runs from the config itself.
+- **Seed 43, trained from the config itself: 1.4855** (s42: 1.4870; mean
+  1.486). The config reproduces the sweep run, and the seed spread is
+  0.002.
 
 **X33 — M7 baseline: position curve and cross-window loss (2026-11-19).**
 `ig-position` (`intgrad/position.py`): the val bucket as 128 sequential
@@ -1422,6 +1424,7 @@ first 65 bytes contain no document start and no EOD (3,968 of 4,096).
 | run | window bpb | cold | warm | gap |
 |---|---|---|---|---|
 | **M7 base (lr 7.5e-4, warmup 1000)** | 1.483 | 1.863 | 1.399 | **0.463 ± 0.005** |
+| M7 base, seed 43 | 1.482 | 1.861 | 1.397 | 0.464 ± 0.005 |
 | lr 7.5e-4 | 1.491 | 1.872 | 1.408 | 0.464 |
 | lr 5e-4 | 1.489 | 1.869 | 1.405 | 0.465 |
 
