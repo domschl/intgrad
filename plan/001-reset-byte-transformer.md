@@ -1297,6 +1297,40 @@ wd 3, otherwise as X25.
   becomes the better choice only where VRAM binds, i.e. cores well above L.
   That is the open question for the M7 base.
 
+**X29 — M6 round 10: where the byte path loses information (2026-11-19).**
+L core, utf8, lr 7.5e-4, wd 3, 300 MB; one change per run against 1.765.
+
+| run | change | bpb | wiki-en | wiki-de | books | wall time |
+|---|---|---|---|---|---|---|
+| baseline | enc 2, dec 2, d_b 256, patch-local | 1.765 | 1.720 | 1.833 | 1.754 | 23.5 min |
+| dec4 | 4 decoder layers | 1.754 | 1.717 | 1.824 | 1.737 | 28.5 min |
+| enc4 | 4 encoder layers (patch-local) | 1.766 | 1.723 | 1.835 | 1.755 | 28.7 min |
+| encw64 | all-wide encoder, window 64, embedding skip | 1.933 | 1.934 | 2.075 | 1.874 | 31.0 min |
+| encw256 | same, window 256 | 1.902 | 1.896 | 2.036 | 1.849 | 30.7 min |
+| **k2** | patches of 2 bytes | **1.605** | 1.551 | 1.632 | 1.612 | 39.1 min |
+| dec8, d_b 512 | | OOM | | | | |
+
+- **The compression ratio is the lever.** k2 gains 0.16 and beats the
+  4× k4 run (1.644 in 93 min) in 39 min. Per GPU-hour k2 is the best
+  hourglass so far, 0.08 behind flat L (1.525, 58.6 min).
+- **Byte-path depth hardly matters.** Decoder depth gives −0.011; encoder
+  depth gives nothing. The k-byte patch vector, not the byte layers, is
+  the bottleneck.
+- **The all-wide encoder is much worse, but confounded.** It also moves the
+  decoder skip from the patch-local encoder output to the raw embedding.
+  Round 11 separates the two: an embedding-skip control, and `enc_wide`
+  (local encoder for the skip, wide layers feeding only the down path).
+- **OOM, and a VRAM correction to X28.** dec8 and d_b 512 ran out of memory
+  in one 16×2048 pass. Training peaks at 16×2048 per pass are 7.3 GiB
+  (baseline), 9.2 (dec4/enc4), 6.6 (all-wide encoder) and 9.7 (k2). X28's
+  "3.8 GiB in training" came from a probe, not this setting, and is wrong.
+  Flat L runs with micro-batches of 8×1024 (8 KiB per pass) and peaks at
+  3.3 GiB. At the same 8 KiB per pass the hourglass peaks at 2.1 GiB, so
+  X28's direction (about −35%) holds. dec8 and d_b 512 fit at 3.6 and
+  3.2 GiB with `micro_batch` 4.
+- **Round 11:** embedding-skip control; `enc_wide` 2 layers at windows 64
+  and 256; dec8 and d_b 512 with micro-batches; k2 + dec4.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
