@@ -245,13 +245,23 @@ def test_patch_lengths_fit_segment_window():
 
 
 def _wide(**kw):
+    kw = {"enc_window": 16, **kw}
     return Hourglass(d=64, L=2, H=2, T=64, k=4, d_b=32, byte_mix="patch", byte_dh=16,
-                     patching="utf8", enc_window=16, **kw)
+                     patching="utf8", **kw)
 
 
-def test_wide_encoder_is_causal():
+def test_all_wide_encoder_rejects_encoder_skip():
+    with pytest.raises(ValueError):
+        _wide(skip="enc")
+
+
+WIDE = [dict(), dict(enc_wide=1), dict(enc_window=0, skip="emb")]
+
+
+@pytest.mark.parametrize("kw", WIDE)
+def test_wide_encoder_is_causal(kw):
     torch.manual_seed(3)
-    m = _wide().eval()
+    m = _wide(**kw).eval()
     x = torch.tensor([list(("Grüße – 日本語 ok. " * 6).encode()[:64])])
     base = m(x)
     for t in range(0, 63, 5):
@@ -259,21 +269,23 @@ def test_wide_encoder_is_causal():
         torch.testing.assert_close(m(y)[0, : t + 1], base[0, : t + 1])
 
 
-def test_wide_encoder_keeps_core_essential():
+@pytest.mark.parametrize("kw", WIDE)
+def test_wide_encoder_keeps_core_essential(kw):
     """Decoder must not see beyond its patch except through the core: with
     the core output zeroed, changing bytes in an earlier patch must not
     change predictions in a later patch (the wide encoder only feeds the core)."""
     torch.manual_seed(4)
-    m = _wide().eval()
+    m = _wide(**kw).eval()
     m.up.weight.data.zero_()                      # cut the core -> decoder path
     x = torch.tensor([list(b"abcdefghijklmnopqrstuvwxyz012345abcdefghijklmnopqrstuvwxyz012345")])
     y = x.clone(); y[0, 3] = ord("Z")             # patch 0
     torch.testing.assert_close(m(y)[0, 8:], m(x)[0, 8:])
 
 
-def test_wide_encoder_patch_vector_sees_earlier_patches():
+@pytest.mark.parametrize("kw", WIDE[:2])
+def test_wide_encoder_patch_vector_sees_earlier_patches(kw):
     torch.manual_seed(5)
-    m = _wide().eval()
+    m = _wide(**kw).eval()
     x = torch.tensor([list(b"abcdefghijklmnopqrstuvwxyz012345abcdefghijklmnopqrstuvwxyz012345")])
     y = x.clone(); y[0, 3] = ord("Z")
     seen = {}

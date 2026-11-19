@@ -120,7 +120,8 @@ class Hourglass(ByteLM):
                  enc: int = 2, dec: int = 2, kernel: int = 0, zloss: float = 1e-4,
                  qk_norm: bool = True, qkv_conv: int = 0, qat: QAT | dict | None = None,
                  byte_mix: str = "conv", byte_window: int = 64, byte_dh: int = 64,
-                 patching: str = "fixed", enc_window: int = 0):
+                 patching: str = "fixed", enc_window: int = 0,
+                 enc_wide: int = 0, skip: str = ""):
         """T: byte context (a multiple of k); the global stack sees T/k patches.
         byte_mix "conv": ByteBlocks (causal depthwise conv + MLP);
         "attn": transformer Blocks with sliding-window attention over the
@@ -140,7 +141,12 @@ class Hourglass(ByteLM):
         patch vector can use the text before its patch. The decoder stays
         patch-local, and its skip then comes from the byte embedding, not
         the encoder: anything beyond the current patch still reaches the
-        decoder only through the core (no X21 shortcut)."""
+        decoder only through the core (no X21 shortcut).
+        enc_wide > 0 (with enc_window): keep the enc patch-local layers
+        (the decoder skip comes from them) and stack enc_wide wide layers
+        on top that feed only the down projection.
+        skip: "enc" (patch-local encoder output) or "emb" (byte embedding);
+        default "emb" for an all-wide encoder, else "enc"."""
         super().__init__()
         if T % k:
             raise ValueError(f"T={T} must be a multiple of k={k}")
@@ -148,7 +154,7 @@ class Hourglass(ByteLM):
         self.zloss = zloss
         self.qat = qat = QAT(**qat) if isinstance(qat, dict) else (qat or QAT())
         kernel = kernel or max(4, k)
-        n_res = enc + dec
+        n_res = enc + enc_wide + dec
         if byte_mix not in ("conv", "attn", "patch"):
             raise ValueError(f"byte_mix {byte_mix!r}")
         self.byte_mix, self.byte_H = byte_mix, max(1, d_b // byte_dh)
@@ -166,7 +172,14 @@ class Hourglass(ByteLM):
         var = patching != "fixed"
         if enc_window and not var:
             raise ValueError("enc_window needs utf8/chars patching")
-        self.enc_window = enc_window
+        if enc_wide and not enc_window:
+            raise ValueError("enc_wide needs enc_window")
+        self.enc_window, self.enc_wide = enc_window, enc_wide
+        all_wide = bool(enc_window) and not enc_wide
+        skip = skip or ("emb" if all_wide else "enc")
+        if skip not in ("enc", "emb") or (skip == "enc" and all_wide):
+            raise ValueError(f"skip {skip!r}: an all-wide encoder must skip from 'emb' (X21 shortcut)")
+        self.skip, self.all_wide = skip, all_wide
 
         def byte_block():
             if byte_mix == "conv":
@@ -178,9 +191,12 @@ class Hourglass(ByteLM):
         self.emb = nn.Embedding(256, d_b)
         nn.init.normal_(self.emb.weight, std=0.02)
         self.enc = nn.ModuleList(
-            Block(d_b, self.byte_H, n_res, qk_norm, 0, qat, window=enc_window) if enc_window
+            Block(d_b, self.byte_H, n_res, qk_norm, 0, qat, window=enc_window) if all_wide
             else byte_block()
             for _ in range(enc))
+        self.enc_w = nn.ModuleList(          # wide layers that feed only the down path
+            Block(d_b, self.byte_H, n_res, qk_norm, 0, qat, window=enc_window)
+            for _ in range(enc_wide))
         self.n_down = nn.RMSNorm(d_b)
         kd = k * d_b                            # k byte states per patch, both ways
         self.down = nn.Linear(kd, d, bias=False)
@@ -238,12 +254,13 @@ class Hourglass(ByteLM):
             else:                                             # patches are <= seg_window bytes
                 mask = (seg, self.seg_window)
         h = _q(qs, "emb", self.emb(x.long()))
-        skip = h if self.enc_window else None
-        emask = None if self.enc_window else mask         # wide: SDPA sliding-window band
+        e = h
+        emask = None if self.all_wide else mask           # wide: SDPA sliding-window band
         for blk in self.enc:
             h = self._bblk(blk, h, emask)
-        if skip is None:
-            skip = h
+        skip = e if self.skip == "emb" else h
+        for blk in self.enc_w:                            # cross-patch, down path only
+            h = self._bblk(blk, h)
         if tap is not None:
             tap("emb", h)
         if slot is None:
