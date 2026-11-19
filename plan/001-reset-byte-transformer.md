@@ -1330,6 +1330,13 @@ L core, utf8, lr 7.5e-4, wd 3, 300 MB; one change per run against 1.765.
   3.2 GiB with `micro_batch` 4.
 - **Round 11:** embedding-skip control; `enc_wide` 2 layers at windows 64
   and 256; dec8 and d_b 512 with micro-batches; k2 + dec4.
+- **Decision (2026-11-19):** round 11 is the last M6 round. Unless it brings
+  the hourglass within about 0.03 bpb of flat L at equal wall time, M6 is
+  shelved: code and tests stay, and flat L, after a short hyper-parameter
+  sweep, becomes the M7 base. Rationale: round 10 shows the gap is core
+  compute per position (k is the lever, byte-path depth is not), and at
+  this scale VRAM does not bind (flat L trains in 3.3 GiB). The hourglass
+  may return where compute per position binds, e.g. a recurrent core.
 
 ## 9. Risks
 
