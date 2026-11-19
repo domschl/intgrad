@@ -188,7 +188,42 @@ Tests: pool streams continuous, one advance per round, exact resume, and
 the stored state of every stream equals a sequential pass over its
 windows (lr 0; mutation-checked).
 
-N1b (pool, S = 1024) and N2 (carry vs no carry, same pool) are running.
+### N1b — pool control; N2 — state carried (2026-11-19)
+
+| measure | N1b (pool, S 1024) | N2 carry: cold | N2 carry: carried |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.505 | 1.521 | — |
+| books / wiki-en / wiki-de / text | 1.566 / 1.405 / 1.449 / 1.633 | 1.606 / 1.394 / 1.439 / 1.628 | — |
+| first 64 B of continuation windows | 1.839 (warm 1.378, gap 0.461) | 1.951 | **1.597** |
+| whole windows (ig-position) | 1.459 | 1.459 | 1.408 |
+
+- Carried, N2 closes (1.839 − 1.597) / 0.461 = **52%** of N1b's gap
+  (bar 50%). ig-position prints 60%, against N2's own larger gap.
+- **Cold, N2 is worse, and most on books** (+0.040 vs +0.016 overall).
+
+**Why books (64 streams × 160 windows of val, by document age = windows
+since the last document start):**
+
+| age | N1b cold | N2 cold | N2 carried | N2 first 64 B: cold − N1b |
+|---|---|---|---|---|
+| 0 | 1.418 | 1.431 | 1.365 | +0.09 |
+| 1–3 | 1.462 | 1.451 | 1.411 | +0.11 |
+| 4–15 | 1.494 | 1.491 | 1.446 | +0.11 |
+| 16–47 | 1.502 | 1.525 | 1.455 | +0.20 |
+| 48–95 | 1.510 | 1.565 | 1.464 | +0.27 |
+| ≥ 96 | 1.520 | 1.588 | 1.477 | +0.32 |
+
+- **No drift:** the carried state helps more the deeper the window
+  (carried − cold −0.05 at age 1–3, −0.11 at ≥ 96), its rms stays at
+  0.077–0.079 over 160 windows, and carried N2 beats N1b at every age
+  (−0.04 to −0.05).
+- **Cold-start dependence:** in training the state is zero only at a
+  document start. A zero state deep in a document never occurs, and the
+  model leans on the state more the longer a document runs. eval-v1
+  chunks of books are mostly deep inside a book, so books lose most.
+- Not a defect of the recurrence, but a train/eval mismatch. Candidate
+  fix (N2b): state dropout, i.e. zero the carried state of a share of rows
+  per step (e.g. 10%), so mid-document cold starts are trained.
 
 **N2 cost** (GPU probe, fp32, 16 × 1024 per pass): rec = lru is 1.46× the
 time of the base (310 vs 212 ms) with a 9.6 GiB peak (base 6.2); params
