@@ -48,7 +48,8 @@ DEFAULTS = {
               "rec_carry": True,  # plan 002: hand the recurrent state to the next window
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1",
-             "batcher": "random"},  # "sequential": B document-continuous streams (plan 002)
+             "batcher": "random",   # "sequential": document-continuous streams (plan 002)
+             "streams": 0},         # sequential: pool of S streams (0 = batch), B drawn per step
 }
 
 
@@ -235,12 +236,13 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     fwd = torch.compile(model) if t["compile"] else model
     rec = getattr(model, "rec", "none") != "none"      # plan 002 recurrent branch
     fwd_state = (torch.compile(model.forward_state) if t["compile"] else model.forward_state) if rec else None
-    rstate = None                                      # per-layer [B, d_rec], carried across steps
+    rstate = None                                      # per-layer [S, d_rec], one row per stream
     kind = cfg["data"]["batcher"]
     if kind not in ("random", "sequential"):
         raise ValueError(f"data.batcher {kind!r}")
     Batcher = data.SequentialBatcher if kind == "sequential" else data.RandomBatcher
-    batcher = Batcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"])
+    bkw = {"streams": cfg["data"]["streams"]} if kind == "sequential" else {}
+    batcher = Batcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"], **bkw)
     ev = EvalSet(ev_path, "val")
     start = 0
     if resume:
@@ -276,9 +278,10 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             carry = rec and kind == "sequential" and t["rec_carry"]
             reset = torch.from_numpy(b.doc_start).to(dev) if rec and b.doc_start is not None else None
             new_state = []
+            rows = torch.from_numpy(b.rows).to(dev) if carry else None
             for i in range(0, len(x), mb):
                 if rec:
-                    s_in = [s[i:i + mb] for s in rstate] if carry and rstate is not None else None
+                    s_in = [s[rows[i:i + mb]] for s in rstate] if carry and rstate is not None else None
                     lg, s_out = fwd_state(x[i:i + mb], s_in, None if reset is None else reset[i:i + mb])
                     new_state.append([s.detach() for s in s_out])
                 else:
@@ -288,7 +291,11 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
                 loss = loss + li.detach() * (mb / len(x))
                 ce = ce + ci.detach() * (mb / len(x))
             if rec and carry:                          # gradient cut at the window edge (k = 1)
-                rstate = [torch.cat(ss) for ss in zip(*new_state)]
+                if rstate is None:                     # never-visited streams: zero state
+                    rstate = [new_state[0][j].new_zeros(batcher.S, *new_state[0][j].shape[1:])
+                              for j in range(len(new_state[0]))]
+                for j, ss in enumerate(zip(*new_state)):
+                    rstate[j][rows] = torch.cat(ss)
         opt.step()
         if step % t["log_every"] == 0 or step == end - 1:
             el = time.time() - t0

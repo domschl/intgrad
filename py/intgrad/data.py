@@ -137,6 +137,7 @@ class Batch:
     x: np.ndarray                    # [B, T] uint8 inputs
     y: np.ndarray                    # [B, T] uint8 next-byte targets
     doc_start: np.ndarray | None     # [B, T] bool: x[b, t] begins a document
+    rows: np.ndarray | None = None   # [B] stream id of each row (SequentialBatcher)
 
 
 class RandomBatcher:
@@ -170,27 +171,46 @@ class RandomBatcher:
 
 
 class SequentialBatcher:
-    """B document-continuous streams over a bucket.
+    """B rows drawn from S >= B document-continuous streams over a bucket.
 
     Epoch e uses the permutation P_e = permutation(seed, e) of the bucket's
-    docs; stream b reads P_e[b::B] in order and starts epoch e+1 when done.
+    docs; stream s reads P_e[s::S] in order and starts epoch e+1 when done.
     Every stream therefore reads whole documents, so byte coverage within
-    an epoch is uniform by construction."""
+    an epoch is uniform by construction.
 
-    def __init__(self, index: Index, bucket: int, batch: int, seq: int, seed: int):
+    With S = B every batch holds the next window of all streams (row b =
+    stream b). With a pool S > B (a multiple of B) the streams are dealt out
+    in rounds of S/B batches: each round permutes the streams and every
+    stream advances by exactly one window per round, so consecutive batches
+    come from different documents. Batch.rows names each row's stream."""
+
+    def __init__(self, index: Index, bucket: int, batch: int, seq: int, seed: int,
+                 streams: int = 0):
         self.ix = index
         self.ids = index.bucket_ids(bucket)
-        if len(self.ids) < batch:
+        S = streams or batch
+        if S % batch:
+            raise ValueError("streams must be a multiple of batch")
+        if len(self.ids) < S:
             raise ValueError("fewer documents than streams")
-        self.B, self.T, self.seed = batch, seq, seed
+        self.B, self.S, self.T, self.seed = batch, S, seq, seed
+        self.step = 0
         self._perm_cache: dict[int, np.ndarray] = {}
         self._streams: dict[tuple[int, int], _Stream] = {}
         # per stream: epoch, doc position k, offset, carried byte + start flag
-        self.epoch = [0] * batch
-        self.k = [0] * batch
-        self.off = [0] * batch
-        self.carry: list[int | None] = [None] * batch
-        self.carry_start = [False] * batch
+        self.epoch = [0] * S
+        self.k = [0] * S
+        self.off = [0] * S
+        self.carry: list[int | None] = [None] * S
+        self.carry_start = [False] * S
+
+    def _rows(self) -> np.ndarray:
+        if self.S == self.B:
+            return np.arange(self.B)
+        per = self.S // self.B
+        r, j = divmod(self.step, per)
+        perm = np.random.Generator(np.random.PCG64([self.seed, 1 << 20, r])).permutation(self.S)
+        return perm[j * self.B:(j + 1) * self.B]
 
     def _perm(self, epoch: int) -> np.ndarray:
         p = self._perm_cache.get(epoch)
@@ -205,7 +225,7 @@ class SequentialBatcher:
         key = (self.epoch[b], b)
         s = self._streams.get(key)
         if s is None:
-            s = _Stream(self.ix, self._perm(self.epoch[b])[b::self.B])
+            s = _Stream(self.ix, self._perm(self.epoch[b])[b::self.S])
             self._streams = {k: v for k, v in self._streams.items() if k[1] != b}
             self._streams[key] = s
         return s
@@ -226,26 +246,31 @@ class SequentialBatcher:
             filled += n
 
     def next(self) -> Batch:
+        rows = self._rows()
         w = np.empty((self.B, self.T + 1), dtype=np.uint8)
         st = np.zeros((self.B, self.T + 1), dtype=bool)
-        for b in range(self.B):
-            if self.carry[b] is None:            # first batch: prime one byte
-                self._read_row(b, w[b], st[b])
+        for i, b in enumerate(rows):
+            if self.carry[b] is None:            # first window of the stream: prime one byte
+                self._read_row(b, w[i], st[i])
             else:
-                w[b, 0] = self.carry[b]
-                st[b, 0] = self.carry_start[b]
-                self._read_row(b, w[b, 1:], st[b, 1:])
-            self.carry[b] = int(w[b, -1])
-            self.carry_start[b] = bool(st[b, -1])
-        return Batch(w[:, :-1], w[:, 1:], st[:, :-1])
+                w[i, 0] = self.carry[b]
+                st[i, 0] = self.carry_start[b]
+                self._read_row(b, w[i, 1:], st[i, 1:])
+            self.carry[b] = int(w[i, -1])
+            self.carry_start[b] = bool(st[i, -1])
+        self.step += 1
+        return Batch(w[:, :-1], w[:, 1:], st[:, :-1], rows)
 
     def state_dict(self) -> dict:
-        return {"kind": "sequential", "seed": self.seed, "B": self.B, "T": self.T,
+        return {"kind": "sequential", "seed": self.seed, "B": self.B, "S": self.S, "T": self.T,
+                "step": self.step,
                 "epoch": list(self.epoch), "k": list(self.k), "off": list(self.off),
                 "carry": list(self.carry), "carry_start": list(self.carry_start)}
 
     def load_state_dict(self, st: dict) -> None:
         assert st["kind"] == "sequential" and st["seed"] == self.seed and st["B"] == self.B
+        assert st.get("S", st["B"]) == self.S
+        self.step = st.get("step", 0)
         self.epoch, self.k, self.off = list(st["epoch"]), list(st["k"]), list(st["off"])
         self.carry, self.carry_start = list(st["carry"]), list(st["carry_start"])
 

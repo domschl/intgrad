@@ -87,6 +87,45 @@ def test_sequential_rows_are_continuous_documents(corpus):
             assert xs[t + 1].x[b, 0] == xs[t].y[b, -1]
 
 
+def test_stream_pool_rows_are_continuous_documents(corpus):
+    """Pool S > B: each stream, followed through the batches that hold it,
+    reads its documents without gaps; every stream advances exactly once
+    per round of S/B batches."""
+    B, S, T = 4, 12, 97
+    bt = data.SequentialBatcher(corpus, data.TRAIN, batch=B, seq=T, seed=3, streams=S)
+    per, rounds = S // B, 40
+    got = {s: [] for s in range(S)}
+    for r in range(rounds):
+        seen = []
+        for _ in range(per):
+            b = bt.next()
+            assert len(set(b.rows.tolist())) == B
+            seen += b.rows.tolist()
+            for i, s in enumerate(b.rows):
+                got[int(s)].append((b.x[i], b.y[i]))
+        assert sorted(seen) == list(range(S))            # one window per stream per round
+    perm = bt._perm(0)
+    orders = set()
+    for s in range(S):
+        ws = got[s]
+        g = np.concatenate([ws[0][0][:1]] + [y for _, y in ws]).tobytes()
+        want = stream_bytes(corpus, perm[s::S])
+        n = min(len(g), len(want))
+        assert n > 1000 and g[:n] == want[:n]
+        for (_, y0), (x1, _) in zip(ws, ws[1:]):
+            assert x1[0] == y0[-1]
+    for r in range(3):                                   # rounds are dealt in different orders
+        bt2 = data.SequentialBatcher(corpus, data.TRAIN, batch=B, seq=T, seed=3, streams=S)
+        bt2.step = r * per
+        orders.add(tuple(bt2._rows()))
+    assert len(orders) == 3
+
+
+def test_stream_pool_must_be_a_multiple_of_batch(corpus):
+    with pytest.raises(ValueError):
+        data.SequentialBatcher(corpus, data.TRAIN, batch=4, seq=50, seed=0, streams=10)
+
+
 def test_sequential_epoch_rollover_and_coverage(corpus):
     B, T = 3, 512
     bt = data.SequentialBatcher(corpus, data.TRAIN, batch=B, seq=T, seed=5)
@@ -112,15 +151,16 @@ def test_doc_start_mask(corpus):
             prev_last[r] = x[-1]
 
 
-@pytest.mark.parametrize("kind", ["random", "sequential"])
+@pytest.mark.parametrize("kind", ["random", "sequential", "pool"])
 def test_resume_is_exact(corpus, kind):
     cls = data.RandomBatcher if kind == "random" else data.SequentialBatcher
-    a = cls(corpus, data.TRAIN, batch=4, seq=300, seed=11)
+    kw = {"streams": 12} if kind == "pool" else {}
+    a = cls(corpus, data.TRAIN, batch=4, seq=300, seed=11, **kw)
     for _ in range(37):
         a.next()
     st = json.loads(json.dumps(a.state_dict()))          # must be JSON-able
     ref = [a.next().x.copy() for _ in range(20)]
-    c = cls(corpus, data.TRAIN, batch=4, seq=300, seed=11)
+    c = cls(corpus, data.TRAIN, batch=4, seq=300, seed=11, **kw)
     c.load_state_dict(st)
     for r in ref:
         assert np.array_equal(c.next().x, r)

@@ -11,11 +11,13 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 
 
 @need
-@pytest.mark.parametrize("quant,batcher,rec", [(True, "random", False), (False, "random", False),
-                                               (False, "sequential", False), (False, "sequential", True)])
-def test_resume_is_bit_exact(tmp_path, quant, batcher, rec):
+@pytest.mark.parametrize("quant,batcher,rec,streams", [
+    (True, "random", False, 0), (False, "random", False, 0), (False, "sequential", False, 0),
+    (False, "sequential", True, 0), (False, "sequential", True, 32)])
+def test_resume_is_bit_exact(tmp_path, quant, batcher, rec, streams):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"]["batcher"] = batcher
+    cfg["data"]["streams"] = streams           # 32 streams, 8 per batch: state per stream
     if rec:                                    # plan 002: carried recurrent state survives resume
         cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
                         "rec_chunk": 8}
@@ -87,3 +89,37 @@ def test_lr_multipliers_split_embedding_and_gains():
     assert by[id(m.nf.weight)]["lr_mult"] == 0.5
     assert by[id(m.blocks[0].qkv.weight)].get("lr_mult", 1.0) == 1.0
     assert sum(len(g["params"]) for g in gs) == len(list(m.parameters()))
+
+
+@need
+def test_stream_pool_state_follows_its_stream(tmp_path):
+    """lr = 0 keeps the model fixed; the state the trainer stores for each
+    stream of a pool must equal a sequential pass over that stream's
+    windows (with its doc resets)."""
+    from intgrad import data
+    from intgrad.quant import QuantConfig
+    cfg = copy.deepcopy(train.DEFAULTS)
+    cfg["data"].update(batcher="sequential", streams=32)
+    cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
+                    "rec_chunk": 8}
+    cfg["train"].update(steps=14, batch=8, micro_batch=4, warmup=1, lr=0.0, device="cpu",
+                        log_every=10, final_eval=False)
+    cfg["name"] = "p"
+    train.run(cfg, out_root=tmp_path)
+    ck = torch.load(tmp_path / "p-s42/ckpt.pt", weights_only=False)
+    m = train.build_model(cfg, QuantConfig(**cfg["quant"]), torch.Generator().manual_seed(0))
+    m.load_state_dict(ck["model"])
+    m.eval()
+    bt = data.SequentialBatcher(data.Index(train.ROOT / cfg["data"]["index"]), data.TRAIN, batch=8, seq=32,
+                                seed=cfg["train"]["seed"], streams=32)
+    state = {}
+    with torch.no_grad():
+        for _ in range(14):
+            b = bt.next()
+            for i, s in enumerate(b.rows.tolist()):
+                _, state[s] = m.forward_state(torch.from_numpy(b.x[i:i + 1]), state.get(s),
+                                              torch.from_numpy(b.doc_start[i:i + 1]))
+    assert len(state) == 32
+    for s, st in state.items():
+        for j in range(len(st)):
+            torch.testing.assert_close(ck["rec_state"][j][s], st[j][0], rtol=1e-4, atol=1e-5)

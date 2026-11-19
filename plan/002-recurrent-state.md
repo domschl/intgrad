@@ -159,4 +159,37 @@ needs its own grid. Range telemetry of h, a_t and the gates.
 
 ## 8. Experiment log
 
-*(empty)*
+### N1 — sequential control, 32 streams (2026-11-19)
+M7 base, `data.batcher = "sequential"`, B = 32 streams, seed 42, 300 MB.
+
+| measure | random windows (X33) | N1, 32 streams |
+|---|---|---|
+| eval-v1 | 1.487 | **1.577** |
+| books / wiki-en / wiki-de / text | 1.513 / 1.423 / 1.479 / 1.611 | 1.602 / 1.485 / 1.552 / 1.910 |
+| cold, first 64 B of continuation windows | 1.863 | 1.923 |
+| warm | 1.399 | 1.461 |
+| gap | 0.463 | 0.461 ± 0.005 |
+
+- The gap is unchanged, but eval-v1 is 0.09 worse, at every eval step
+  (0.13 at step 2000) and in every domain, most in "text" (+0.30).
+- Cause (likely): 32 streams read whole documents, so a long document
+  (a book of 1 MB = 1000 windows) holds its row for about 1000 steps.
+  Consecutive batches are strongly correlated and share few documents.
+- So N1 is not a usable control: any recurrent model trained this way
+  inherits a 0.09 loss that has nothing to do with the state.
+
+**Fix: a stream pool** (`data.streams = S`). S ≥ B streams; each round of
+S/B steps permutes the streams and deals them out B at a time, so every
+stream advances one window per round and consecutive batches come from
+different documents. The trainer keeps one recurrent state per stream
+([S, d] per layer, 16 MB at S = 1024) and gathers/scatters it by
+`Batch.rows`. A stream's state is from weights at most 2·S/B steps old.
+Tests: pool streams continuous, one advance per round, exact resume, and
+the stored state of every stream equals a sequential pass over its
+windows (lr 0; mutation-checked).
+
+N1b (pool, S = 1024) and N2 (carry vs no carry, same pool) are running.
+
+**N2 cost** (GPU probe, fp32, 16 × 1024 per pass): rec = lru is 1.46× the
+time of the base (310 vs 212 ms) with a 9.6 GiB peak (base 6.2); params
+36 M vs 25 M (d_rec = d adds 5d² per layer). Runs use micro_batch 8.
