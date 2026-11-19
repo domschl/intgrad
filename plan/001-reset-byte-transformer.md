@@ -527,6 +527,10 @@ start. This is the baseline any recurrent state in plan 002 must beat.
 Deliverables: metric implemented, baseline numbers recorded,
 `plan/002-recurrent-state.md` drafted.
 
+**Status (2026-11-19).** Base: tuned flat L, `configs/m7-base.toml` (X31,
+X32); the hourglass is shelved (X30). Metric: `ig-position` (tested,
+mutation-checked). Baseline: X33. Plan 002: drafted.
+
 ---
 
 ## 6. Decisions (plan 001)
@@ -1387,6 +1391,55 @@ one change per run against lr 1.5e-3, wd 3, betas 0.95/0.98, warmup 300
   at equal wall time.
 - **Round 2 (running):** lr 5e-4; lr 7.5e-4 with wd 1.5; lr 7.5e-4 with
   warmup 1000.
+
+**X32 — M7 prep: flat L sweep, round 2, and the M7 base (2026-11-19).**
+
+| run | bpb | wiki-en | wiki-de | books |
+|---|---|---|---|---|
+| lr 7.5e-4 (X31) | 1.494 | 1.429 | 1.489 | 1.520 |
+| lr 5e-4 | 1.491 | 1.427 | 1.484 | 1.516 |
+| lr 7.5e-4, wd 1.5 | 1.502 | 1.442 | 1.499 | 1.524 |
+| **lr 7.5e-4, warmup 1000** | **1.487** | 1.423 | 1.479 | 1.513 |
+
+- The lr optimum is flat between 5e-4 and 7.5e-4.
+- At the lower lr, less decay now hurts (+0.008). Lion's decay per step
+  is lr·wd, and 7.5e-4 · 3 is already 2.25e-3.
+- **M7 base: `configs/m7-base.toml`** (flat L, lr 7.5e-4, wd 3,
+  warmup 1000, betas 0.95/0.98, micro-batch 16, 300 MB): 1.487.
+- Tuning gain over M3's L is 0.049 (1.536 → 1.487). Single steps are
+  below 0.05, so they are configuration choices, not claims (§4.5 rule 3).
+  A second seed of the base runs from the config itself.
+
+**X33 — M7 baseline: position curve and cross-window loss (2026-11-19).**
+`ig-position` (`intgrad/position.py`): the val bucket as 128 sequential
+streams (seed 1234), 33 consecutive 1024-byte windows each, windows 1–32
+scored (4,096 windows, 4.2 MB). Continuation windows are those whose
+first 65 bytes contain no document start and no EOD (3,968 of 4,096).
+- **cold**: the first 64 bytes of a continuation window scored from the
+  window alone.
+- **warm**: the same bytes scored with the 960 bytes before them.
+
+| run | window bpb | cold | warm | gap |
+|---|---|---|---|---|
+| **M7 base (lr 7.5e-4, warmup 1000)** | 1.483 | 1.863 | 1.399 | **0.463 ± 0.005** |
+| lr 7.5e-4 | 1.491 | 1.872 | 1.408 | 0.464 |
+| lr 5e-4 | 1.489 | 1.869 | 1.405 | 0.465 |
+
+Position curve of the M7 base (bpb per offset bin):
+
+| 0 | 1 | 2–3 | 4–7 | 8–15 | 16–31 | 32–63 | 64–127 | 128–255 | 256–511 | 512–767 | 768–1023 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 3.95 | 3.48 | 2.84 | 2.23 | 1.94 | 1.77 | 1.67 | 1.60 | 1.52 | 1.47 | 1.43 | 1.42 |
+
+- **Cold starts cost almost half a bit per byte over the first 64 bytes**,
+  and nearly every window is a continuation. This is the number a
+  recurrent state in plan 002 has to win back. A state that carried one
+  full window perfectly would reach the warm number.
+- **The curve still falls between 512 and 1024 bytes** (1.43 → 1.42),
+  so context beyond one window still has value. A state may beat
+  "warm", which only looks back one window.
+- The gap is the same at every tuned setting (0.463–0.465). It is a
+  property of the windowing, not of the tuning.
 
 ## 9. Risks
 
