@@ -228,3 +228,26 @@ since the last document start):**
 **N2 cost** (GPU probe, fp32, 16 × 1024 per pass): rec = lru is 1.46× the
 time of the base (310 vs 212 ms) with a 9.6 GiB peak (base 6.2); params
 36 M vs 25 M (d_rec = d adds 5d² per layer). Runs use micro_batch 8.
+
+### N2 — no-carry control (2026-11-19)
+Same recurrent model, state reset at every window (`train.rec_carry = false`).
+
+| measure | N1b | N2 no carry | N2 carry |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.505 | **1.491** | 1.521 |
+| books | 1.566 | 1.549 | 1.606 |
+| whole windows, cold / carried | 1.459 / — | 1.447 / 1.475 | 1.459 / **1.408** |
+| first 64 B, cold / carried | 1.839 / — | 1.816 / 1.714 | 1.951 / **1.597** |
+| gap (cold − warm) | 0.461 | 0.445 | 0.587 |
+
+- **The branch alone helps:** −0.014 on eval-v1 and −0.012 on windows
+  (11 M more parameters, 1.56× the time).
+- **The carried state on top:** whole windows 1.408 vs 1.447 (−0.039);
+  first 64 B 1.597 vs 1.816, i.e. 49% of the no-carry gap (52% of N1b's).
+  At the bar, one seed.
+- **Cost of carry training at zero state:** eval-v1 1.521 vs 1.491
+  (+0.030), the cold-start dependence above.
+- Given a carried state it was never trained with, the no-carry model
+  still gains on the first 64 B (1.714) but loses on whole windows
+  (1.475): the state is usable but not trained to be.
+
