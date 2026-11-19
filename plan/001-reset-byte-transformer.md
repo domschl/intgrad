@@ -1304,7 +1304,7 @@ L core, utf8, lr 7.5e-4, wd 3, 300 MB; one change per run against 1.765.
 |---|---|---|---|---|---|---|
 | baseline | enc 2, dec 2, d_b 256, patch-local | 1.765 | 1.720 | 1.833 | 1.754 | 23.5 min |
 | dec4 | 4 decoder layers | 1.754 | 1.717 | 1.824 | 1.737 | 28.5 min |
-| enc4 | 4 encoder layers (patch-local) | 1.766 | 1.723 | 1.835 | 1.755 | 28.7 min |
+| enc4 | 4 encoder layers (patch-local) | 1.766 | 1.723 | 1.835 | 1.755 | 28.6 min |
 | encw64 | all-wide encoder, window 64, embedding skip | 1.933 | 1.934 | 2.075 | 1.874 | 31.0 min |
 | encw256 | same, window 256 | 1.902 | 1.896 | 2.036 | 1.849 | 30.7 min |
 | **k2** | patches of 2 bytes | **1.605** | 1.551 | 1.632 | 1.612 | 39.1 min |
