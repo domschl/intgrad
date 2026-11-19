@@ -11,9 +11,11 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 
 
 @need
-@pytest.mark.parametrize("quant", [True, False])
-def test_resume_is_bit_exact(tmp_path, quant):
+@pytest.mark.parametrize("quant,batcher", [(True, "random"), (False, "random"),
+                                           (False, "sequential")])
+def test_resume_is_bit_exact(tmp_path, quant, batcher):
     cfg = copy.deepcopy(train.DEFAULTS)
+    cfg["data"]["batcher"] = batcher
     cfg["model"].update(ctx=3, hidden=16)
     cfg["quant"]["enabled"] = quant
     cfg["quant"]["w2_sr"] = quant              # exercise the SR generator too

@@ -33,8 +33,7 @@ Success is measured against the M7 baseline (plan 001 X33):
 | **cross-window gap** | **0.463 ± 0.005** (seed 43: 0.464) |
 
 The recurrence **works** if the carried state closes a clear share of the
-gap (proposed target: ≥ 50%, i.e. cold ≤ 1.63) without making eval-v1
-worse.
+gap (≥ 50%, D6) without making eval-v1 worse.
 
 ## 1. Starting point (from plan 001)
 
@@ -128,11 +127,11 @@ needs its own grid. Range telemetry of h, a_t and the gates.
 - **002-D5 Baseline:** cross-window numbers are compared with the
   sequential control (N1) on the same windows (`ig-position`, seed 1234).
 
-## 6. Open questions (for review)
-
-1. Is the ≥ 50% gap target the right bar?
-2. Byte numerics: a quantized twin only at N4 (proposed), or at every
-   milestone?
+- **002-D6 Bar:** success = the carried state closes ≥ 50% of the
+  cross-window gap (cold ≤ 1.63 at the M7 numbers; relative to N1's gap
+  once measured), with no eval-v1 regression (user, 2026-11-19).
+- **002-D7 Numerics:** fp until N4. The quantized twin runs only at N4,
+  once the recurrence is shown to work (user, 2026-11-19).
 
 ## 7. Risks
 

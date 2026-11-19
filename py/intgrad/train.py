@@ -46,7 +46,8 @@ DEFAULTS = {
               "norm_wd": 0.0, "conv_decay": "zero",
               "lr_emb": 1.0, "lr_vec": 1.0,  # lr multipliers: embedding/head, gains
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
-    "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1"},
+    "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1",
+             "batcher": "random"},  # "sequential": B document-continuous streams (plan 002)
 }
 
 
@@ -230,7 +231,11 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     ctx = context_len(cfg, model)
     is_mlp = cfg_is_mlp(model)
     fwd = torch.compile(model) if t["compile"] else model
-    batcher = data.RandomBatcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"])
+    kind = cfg["data"]["batcher"]
+    if kind not in ("random", "sequential"):
+        raise ValueError(f"data.batcher {kind!r}")
+    Batcher = data.SequentialBatcher if kind == "sequential" else data.RandomBatcher
+    batcher = Batcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"])
     ev = EvalSet(ev_path, "val")
     start = 0
     if resume:
