@@ -1365,6 +1365,29 @@ L core, utf8, lr 7.5e-4, wd 3, 300 MB; one change per run against 1.765.
   base**, after the sweep in `runs/m7a.sh` (lr 1e-3 and 7.5e-4; wd 1 and 6;
   betas 0.9/0.99; warmup 1000).
 
+**X31 — M7 prep: flat L sweep, round 1 (2026-11-19).** Flat L, 300 MB, Lion,
+one change per run against lr 1.5e-3, wd 3, betas 0.95/0.98, warmup 300
+(1.525). Micro-batch 16: 6.25 GiB, 57.7 min per run.
+
+| run | bpb | Δ | wiki-en | wiki-de | books |
+|---|---|---|---|---|---|
+| **lr 7.5e-4** | **1.494** | −0.031 | 1.429 | 1.489 | 1.520 |
+| lr 1e-3 | 1.501 | −0.024 | 1.436 | 1.499 | 1.525 |
+| wd 1 | 1.505 | −0.020 | 1.442 | 1.501 | 1.529 |
+| warmup 1000 | 1.513 | −0.012 | 1.450 | 1.512 | 1.537 |
+| betas 0.9/0.99 | 1.521 | −0.004 | 1.462 | 1.527 | 1.541 |
+| wd 6 | 1.542 | +0.017 | 1.482 | 1.545 | 1.562 |
+
+- **Lower lr is the lever again**, with the same optimum as the hourglass
+  core (7.5e-4). The curve is flattening (3e-3 → 1.5e-3 → 1e-3 → 7.5e-4:
+  1.536, 1.525, 1.501, 1.494).
+- **Less decay and a longer warmup help a little.** With Lion the decay
+  per step is lr·wd, so lowering lr already lowers it. Betas are neutral.
+- **Tuning moves flat L 0.031 further from the hourglass**: about 0.08
+  at equal wall time.
+- **Round 2 (running):** lr 5e-4; lr 7.5e-4 with wd 1.5; lr 7.5e-4 with
+  warmup 1000.
+
 ## 9. Risks
 
 1. **Quantized attention/softmax** is new territory (the MLP had none).
