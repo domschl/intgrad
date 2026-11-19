@@ -1,7 +1,7 @@
-# Plan 002 — Recurrent state in every block (draft)
+# Plan 002 — Recurrent state in every block
 
 *Drafted 2026-11-19 as the M7 deliverable of plan 001; revised the same day
-after review. Status: **draft for review**. Plan 001 stays the reference for
+after review. Status: **active** (D1–D7 settled 2026-11-19). Plan 001 stays the reference for
 numerics, data, eval and experiment rules (§4.5 there). Results go into §8
 of this plan.*
 
