@@ -20,6 +20,7 @@ import time
 import tomllib
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -46,6 +47,7 @@ DEFAULTS = {
               "norm_wd": 0.0, "conv_decay": "zero",
               "lr_emb": 1.0, "lr_vec": 1.0,  # lr multipliers: embedding/head, gains
               "rec_carry": True,  # plan 002: hand the recurrent state to the next window
+              "rec_drop": 0.0,   # carry: share of rows per step whose carried state is zeroed (plan 002 N2b)
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1",
              "batcher": "random",   # "sequential": document-continuous streams (plan 002)
@@ -279,9 +281,14 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             reset = torch.from_numpy(b.doc_start).to(dev) if rec and b.doc_start is not None else None
             new_state = []
             rows = torch.from_numpy(b.rows).to(dev) if carry else None
+            keep = None                                # N2b: random cold starts inside documents
+            if carry and t["rec_drop"] > 0:
+                u = np.random.Generator(np.random.PCG64([t["seed"], 1 << 21, step])).random(len(x))
+                keep = torch.from_numpy(u >= t["rec_drop"]).to(dev)[:, None]
             for i in range(0, len(x), mb):
                 if rec:
-                    s_in = [s[rows[i:i + mb]] for s in rstate] if carry and rstate is not None else None
+                    s_in = [s[rows[i:i + mb]] if keep is None else s[rows[i:i + mb]] * keep[i:i + mb]
+                            for s in rstate] if carry and rstate is not None else None
                     lg, s_out = fwd_state(x[i:i + mb], s_in, None if reset is None else reset[i:i + mb])
                     new_state.append([s.detach() for s in s_out])
                 else:

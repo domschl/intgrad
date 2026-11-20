@@ -13,11 +13,12 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 @need
 @pytest.mark.parametrize("quant,batcher,rec,streams", [
     (True, "random", False, 0), (False, "random", False, 0), (False, "sequential", False, 0),
-    (False, "sequential", True, 0), (False, "sequential", True, 32)])
+    (False, "sequential", True, 0), (False, "sequential", True, 32), (False, "sequential", True, -32)])
 def test_resume_is_bit_exact(tmp_path, quant, batcher, rec, streams):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"]["batcher"] = batcher
-    cfg["data"]["streams"] = streams           # 32 streams, 8 per batch: state per stream
+    cfg["data"]["streams"] = abs(streams)      # 32 streams, 8 per batch: state per stream
+    cfg["train"]["rec_drop"] = 0.25 if streams < 0 else 0.0   # negative: with state clearing
     if rec:                                    # plan 002: carried recurrent state survives resume
         cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
                         "rec_chunk": 8}
@@ -123,3 +124,25 @@ def test_stream_pool_state_follows_its_stream(tmp_path):
     for s, st in state.items():
         for j in range(len(st)):
             torch.testing.assert_close(ck["rec_state"][j][s], st[j][0], rtol=1e-4, atol=1e-5)
+
+
+@need
+def test_rec_drop_one_equals_no_carry(tmp_path):
+    """train.rec_drop = 1 zeroes every carried state: the same run as
+    rec_carry = false. rec_drop = 0.5 differs from both."""
+    cfg = copy.deepcopy(train.DEFAULTS)
+    cfg["data"].update(batcher="sequential", streams=16)
+    cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
+                    "rec_chunk": 8}
+    cfg["train"].update(steps=12, batch=8, warmup=2, device="cpu", log_every=10, final_eval=False)
+    out = {}
+    for name, kw in {"drop1": {"rec_drop": 1.0}, "nocarry": {"rec_carry": False},
+                     "drop5": {"rec_drop": 0.5}, "carry": {}}.items():
+        c = copy.deepcopy(cfg)
+        c["name"] = name
+        c["train"].update(kw)
+        train.run(c, out_root=tmp_path)
+        out[name] = torch.load(tmp_path / f"{name}-s42/ckpt.pt", weights_only=False)["model"]
+    same = lambda a, b: all(torch.equal(out[a][k], out[b][k]) for k in out[a])
+    assert same("drop1", "nocarry")
+    assert not same("drop5", "carry") and not same("drop5", "nocarry")
