@@ -327,3 +327,32 @@ heads of 16 channels, a 16 × 16 state per head, one decay per head.
   gap is not (only) a state-capacity limit. Confound: the SSD form also
   shares one decay over 16 channels (32 decay rates per layer instead of
   512) and normalises k and q. Not separated by this run.
+
+### N3b — nonlinear recurrence in the middle block (2026-11-20)
+N2b protocol (cosine, rec_drop 0.1, seed 42) with `model.rec_nonlin="mid"`:
+block 4 of 8 runs h = a·h + √(1−a²)·σ(i)·tanh(u + W h) with a dense,
+zero-initialised 512 × 512 W; the other seven blocks are N2b.
+
+| | N2b s42 | N2b s43 | N3b s42 |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.490 | 1.489 | 1.495 |
+| books / wiki-defs / text | 1.549 / 1.382 / 1.622 | 1.551 / 1.382 / 1.621 | 1.554 / 1.403 / 1.619 |
+| whole windows, zero state / carried | 1.448 / 1.410 | 1.444 / 1.406 | 1.456 / 1.415 |
+| first 64 B, carried | 1.601 | 1.586 | 1.601 |
+| gap closed, vs N1b | 52% | 55% | 53% |
+| throughput, peak memory | 58 kB/s, 5.4 GiB | 55 kB/s, 5.4 GiB | 36 kB/s, 5.2 GiB |
+
+- **No gain:** +0.0055 on eval-v1 against the paired seed (seed spread
+  0.0005); gap closed 53%, inside the N2b range. Only text is marginally
+  better (−0.002); wiki-defs is +0.02 worse.
+- W is used, not ignored: Frobenius norm 49, top singular value 40, 164
+  singular values above 1. The block learnt a strongly nonlinear state
+  map, which did not turn into lower loss or more cross-window carry at
+  this scale and step budget.
+- Quick val: ahead of N2b s43 early (−0.04 at step 1200), behind from
+  step 4000 on (+0.005 to +0.01).
+- Cost: the sequential loop runs at 62% of N2b's throughput; at equal
+  wall clock the gap would be larger.
+- Not run: the dense-W-without-tanh control, a second seed, the
+  block-diagonal / kernel optimisations. With no gain at equal steps there
+  is nothing for them to attribute or speed up.
