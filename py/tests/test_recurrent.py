@@ -2,7 +2,7 @@
 import pytest
 import torch
 
-from intgrad.models.recurrent import RecMix, linear_scan, ssd_scan
+from intgrad.models.recurrent import RecMix, linear_scan, nonlin_scan, ssd_scan
 from intgrad.models.transformer import ByteTransformer
 
 
@@ -54,12 +54,15 @@ def test_ssd_scan_matches_sequential(T, chunk):
         torch.testing.assert_close(S, ref[1])
 
 
-@pytest.mark.parametrize("state", [1, 4])
+@pytest.mark.parametrize("state", [1, 4, "nl"])
 def test_recmix_carry_equals_one_long_pass(state):
     """Without the conv (which does not carry), two halves with the state
     handed over give exactly the single pass over both."""
     torch.manual_seed(0)
-    m = RecMix(16, 2, conv=0, chunk=8, state=state, head=4)
+    m = (RecMix(16, 2, conv=0, nonlin=True) if state == "nl"
+         else RecMix(16, 2, conv=0, chunk=8, state=state, head=4))
+    if m.W is not None:
+        torch.nn.init.normal_(m.W, std=0.3)
     x = torch.randn(2, 40, 16)
     full, _ = m(x)
     y1, s = m(x[:, :24])
@@ -73,15 +76,50 @@ def test_recmix_decay_init_range():
     assert a.min() >= 0.9 - 1e-4 and a.max() <= 0.999 + 1e-4
 
 
-@pytest.fixture(params=[1, 4], ids=["N1", "N4"])
+@pytest.fixture(params=[1, 4, "nl"], ids=["N1", "N4", "nonlin"])
 def state(request):
     return request.param
 
 
-def _model(state=1):
+def _kw(state):
+    if state == "nl":                                       # N3b: nonlinear middle layer, W nonzero
+        return {"rec_nonlin": "mid"}
+    return {"rec_state": state, "rec_head": 8}
+
+
+def _model(state=1, L=2):
     torch.manual_seed(0)
-    return ByteTransformer(d=32, L=2, H=2, T=32, rec="lru", rec_chunk=8,
-                           rec_state=state, rec_head=8).eval()
+    m = ByteTransformer(d=32, L=L, H=2, T=32, rec="lru", rec_chunk=8, **_kw(state))
+    for r in m.recs:
+        if r.W is not None:
+            torch.nn.init.normal_(r.W, std=0.3)
+    return m.eval()
+
+
+def test_nonlin_scan_matches_formula():
+    g = torch.Generator().manual_seed(0)
+    B, T, D = 2, 9, 4
+    a, s = torch.rand(B, T, D, generator=g), torch.rand(B, T, D, generator=g)
+    u, W, h0 = torch.randn(B, T, D, generator=g), torch.randn(D, D, generator=g), torch.randn(B, D, generator=g)
+    reset = torch.zeros(B, T, dtype=torch.bool)
+    reset[1, 4] = True
+    h, out = h0.clone(), []
+    for t in range(T):
+        hp = torch.where(reset[:, t, None], 0.0, h)
+        h = a[:, t] * hp + s[:, t] * torch.tanh(u[:, t] + hp @ W.T)
+        out.append(h)
+    torch.testing.assert_close(nonlin_scan(a, s, u, W, h0, reset), torch.stack(out, 1))
+
+
+def test_nonlin_only_in_the_middle_block_and_W_learns():
+    m = ByteTransformer(d=32, L=4, H=2, T=32, rec="lru", rec_chunk=8, rec_nonlin="mid")
+    assert [r.W is not None for r in m.recs] == [False, False, True, False]
+    assert torch.count_nonzero(m.recs[2].W) == 0             # starts linear in h
+    x, _ = _windows()
+    _, s = m.forward_state(x)
+    lg, _ = m.forward_state(x, s)
+    lg.square().mean().backward()
+    assert m.recs[2].W.grad.abs().sum() > 0
 
 
 def test_state_one_keeps_the_n1_parameters():
@@ -122,7 +160,7 @@ def test_carried_state_reaches_the_next_window(state):
     a, _ = m.forward_state(w2, s)
     b, _ = m.forward_state(w2, s_other)
     assert not torch.allclose(a, b)                         # earlier window matters
-    assert all(t.shape == ((2, 32) if state == 1 else (2, 4, 8, 4)) for t in s)
+    assert all(t.shape == ((2, 4, 8, 4) if state == 4 else (2, 32)) for t in s)
 
 
 def test_reset_erases_the_previous_window(state):
@@ -132,8 +170,7 @@ def test_reset_erases_the_previous_window(state):
     states did see window 1 (attention is not document-masked, as in the
     base model)."""
     torch.manual_seed(0)
-    m = ByteTransformer(d=32, L=1, H=2, T=32, rec="lru", rec_chunk=8,
-                        rec_state=state, rec_head=8).eval()
+    m = _model(state, L=1)
     w1, w2 = _windows()
     p = 11
     reset = torch.zeros(2, 32, dtype=torch.bool)

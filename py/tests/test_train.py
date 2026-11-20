@@ -14,7 +14,7 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 @pytest.mark.parametrize("quant,batcher,rec,streams", [
     (True, "random", False, 0), (False, "random", False, 0), (False, "sequential", False, 0),
     (False, "sequential", 1, 0), (False, "sequential", 1, 32), (False, "sequential", 1, -32),
-    (False, "sequential", 4, -32)])
+    (False, "sequential", 4, -32), (False, "sequential", "nl", -32)])
 def test_resume_is_bit_exact(tmp_path, quant, batcher, rec, streams):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"]["batcher"] = batcher
@@ -22,7 +22,8 @@ def test_resume_is_bit_exact(tmp_path, quant, batcher, rec, streams):
     cfg["train"]["rec_drop"] = 0.25 if streams < 0 else 0.0   # negative: with state clearing
     if rec:                                    # plan 002: carried state (N = rec) survives resume
         cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
-                        "rec_chunk": 8, "rec_state": rec, "rec_head": 8}
+                        "rec_chunk": 8, "rec_head": 8}
+        cfg["model"].update({"rec_nonlin": "mid"} if rec == "nl" else {"rec_state": rec})
     else:
         cfg["model"].update(ctx=3, hidden=16)
     cfg["quant"]["enabled"] = quant

@@ -123,7 +123,8 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
         else:
             kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
                                     "stem", "stem_dim", "qkv_conv", "logit_quant",
-                                    "rec", "rec_conv", "rec_chunk", "rec_state", "rec_head") if k in m}
+                                    "rec", "rec_conv", "rec_chunk", "rec_state", "rec_head",
+                                    "rec_nonlin") if k in m}
             model = transformer.build(m.get("preset"), qat=qat, **kw)
         for p in model.parameters():          # weights start on their grid
             qc.project_(p)

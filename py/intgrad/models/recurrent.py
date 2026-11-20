@@ -26,6 +26,14 @@ heads of P; each head carries a P x N state with one decay per head:
 
 computed chunk-wise: inside a chunk as a decay-masked (q·k) matmul, across
 chunks by handing the P x N chunk states on (ssd_scan).
+
+nonlin (plan 002 N3b, one layer): the input term sees the previous state
+through a dense W and a tanh, so the update is no longer linear in h:
+
+    h_t = a_t ⊙ h_{t−1} + sqrt(1 − a_t²) ⊙ i_t ⊙ tanh(u_t + W h_{t−1})
+
+W starts at zero. This cannot be scanned in parallel: a Python loop over
+the T bytes (nonlin_scan), kept out of torch.compile.
 """
 from __future__ import annotations
 
@@ -114,13 +122,37 @@ def ssd_scan(log_a: torch.Tensor, b: torch.Tensor, k: torch.Tensor, q: torch.Ten
     return o, S
 
 
+@torch.compiler.disable
+def nonlin_scan(a: torch.Tensor, s: torch.Tensor, u: torch.Tensor, W: torch.Tensor,
+                h0: torch.Tensor | None = None, reset: torch.Tensor | None = None) -> torch.Tensor:
+    """h_t = a_t h_{t-1} + s_t tanh(u_t + W h_{t-1}), with h_{t-1} = 0 where
+    reset. a, s, u: [B, T, D]; W [D, D]; h0 [B, D] or None. Returns h [B, T, D]."""
+    B, T, D = u.shape
+    h = h0 if h0 is not None else u.new_zeros(B, D)
+    # unbind once: indexing a[:, t] inside the loop would make every step's
+    # backward write a full [B, T, D] zero gradient (O(T²) memory traffic)
+    a, s, u = a.unbind(1), s.unbind(1), u.unbind(1)
+    keep = None if reset is None else (~reset).to(h.dtype)[..., None].unbind(1)
+    Wt = W.t()
+    out = []
+    for t in range(T):
+        if keep is not None:
+            h = h * keep[t]
+        h = a[t] * h + s[t] * torch.tanh(torch.addmm(u[t], h, Wt))
+        out.append(h)
+    return torch.stack(out, 1)
+
+
 class RecMix(nn.Module):
     def __init__(self, d: int, L: int, d_rec: int = 0, conv: int = 4, chunk: int = 32,
-                 state: int = 1, head: int = 16):
+                 state: int = 1, head: int = 16, nonlin: bool = False):
         super().__init__()
         self.d_rec = dr = d_rec or d
         self.chunk = chunk
         self.N = state
+        if nonlin and state > 1:
+            raise ValueError("nonlin needs state = 1")
+        self.W = nn.Parameter(torch.zeros(dr, dr)) if nonlin else None
         nd = dr                                         # decays: one per channel (N = 1) or head
         if state > 1:
             if dr % head:
@@ -162,6 +194,12 @@ class RecMix(nn.Module):
             o, S = ssd_scan(log_a, bx, k, q, None if h0 is None else h0.to(f32), reset, self.chunk)
             y = o.reshape(Bt, T, dr).to(x.dtype) * F.gelu(g)
             return x + self.out(y), S
+        if self.W is not None:
+            sc = torch.sqrt(torch.clamp(1 - a * a, min=0.0)) * torch.sigmoid(i.to(f32))
+            h = nonlin_scan(a, sc, u.to(f32), self.W.to(f32),
+                            None if h0 is None else h0.to(f32), reset)
+            y = h.to(x.dtype) * F.gelu(g)
+            return x + self.out(y), h[:, -1]
         bx = torch.sqrt(torch.clamp(1 - a * a, min=0.0)) * (torch.sigmoid(i.to(f32)) * u.to(f32))
         if reset is not None:
             a = a.masked_fill(reset[..., None], 0.0)
