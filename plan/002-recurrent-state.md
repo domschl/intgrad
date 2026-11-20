@@ -106,8 +106,21 @@ gap. These are the reference numbers for everything below.
 - Runs: carry vs no carry (control b).
 
 ### N3 — Unrolling and state size
+Order agreed 2026-11-20: a second N2b seed first (D6), then N3a, then N3b.
+- **N3a, state size:** N = 16 vs N = 1 (`model.rec_state`). A per-channel
+  N-dim state through the linear scan would store [B, T, d, N] per layer
+  (~16 GB at micro-batch 8), so N > 1 uses the chunked SSD form (Mamba-2):
+  heads of P = 16 channels (`model.rec_head`), a P × N state per head,
+  one decay per head (32 decay rates per layer instead of 512), L2-normed
+  write/read vectors k, q. Same N2b protocol (rec_drop 0.1).
+- **N3b, one nonlinear layer:** the middle block's recurrence replaced by
+  a gated nonlinear one, h = a·h + b·tanh(W h + x), the other blocks stay
+  linear (precedent: xLSTM's mostly-mLSTM stacks with a few sLSTM blocks).
+  W dense first (pure PyTorch, sequential in that one layer); if it helps,
+  restrict W to block-diagonal (blocks of 64) for a fused kernel. Control:
+  the same layer linear with matched state size and parameters. Expected
+  to show on structured text (nesting, quoting) more than on the gap.
 - k = 2 vs k = 1.
-- N = 16 vs N = 1.
 - Long documents (books): does the state help beyond one window (the
   warm number)? Position curve over several windows.
 

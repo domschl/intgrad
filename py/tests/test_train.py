@@ -13,15 +13,16 @@ need = pytest.mark.skipif(not (train.ROOT / "data/split-v1/idx.bin").exists(),
 @need
 @pytest.mark.parametrize("quant,batcher,rec,streams", [
     (True, "random", False, 0), (False, "random", False, 0), (False, "sequential", False, 0),
-    (False, "sequential", True, 0), (False, "sequential", True, 32), (False, "sequential", True, -32)])
+    (False, "sequential", 1, 0), (False, "sequential", 1, 32), (False, "sequential", 1, -32),
+    (False, "sequential", 4, -32)])
 def test_resume_is_bit_exact(tmp_path, quant, batcher, rec, streams):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"]["batcher"] = batcher
     cfg["data"]["streams"] = abs(streams)      # 32 streams, 8 per batch: state per stream
     cfg["train"]["rec_drop"] = 0.25 if streams < 0 else 0.0   # negative: with state clearing
-    if rec:                                    # plan 002: carried recurrent state survives resume
+    if rec:                                    # plan 002: carried state (N = rec) survives resume
         cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
-                        "rec_chunk": 8}
+                        "rec_chunk": 8, "rec_state": rec, "rec_head": 8}
     else:
         cfg["model"].update(ctx=3, hidden=16)
     cfg["quant"]["enabled"] = quant
@@ -93,7 +94,8 @@ def test_lr_multipliers_split_embedding_and_gains():
 
 
 @need
-def test_stream_pool_state_follows_its_stream(tmp_path):
+@pytest.mark.parametrize("N", [1, 4])
+def test_stream_pool_state_follows_its_stream(tmp_path, N):
     """lr = 0 keeps the model fixed; the state the trainer stores for each
     stream of a pool must equal a sequential pass over that stream's
     windows (with its doc resets)."""
@@ -102,7 +104,7 @@ def test_stream_pool_state_follows_its_stream(tmp_path):
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"].update(batcher="sequential", streams=32)
     cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
-                    "rec_chunk": 8}
+                    "rec_chunk": 8, "rec_state": N, "rec_head": 8}
     cfg["train"].update(steps=14, batch=8, micro_batch=4, warmup=1, lr=0.0, device="cpu",
                         log_every=10, final_eval=False)
     cfg["name"] = "p"
@@ -127,13 +129,14 @@ def test_stream_pool_state_follows_its_stream(tmp_path):
 
 
 @need
-def test_rec_drop_one_equals_no_carry(tmp_path):
+@pytest.mark.parametrize("N", [1, 4])
+def test_rec_drop_one_equals_no_carry(tmp_path, N):
     """train.rec_drop = 1 zeroes every carried state: the same run as
     rec_carry = false. rec_drop = 0.5 differs from both."""
     cfg = copy.deepcopy(train.DEFAULTS)
     cfg["data"].update(batcher="sequential", streams=16)
     cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
-                    "rec_chunk": 8}
+                    "rec_chunk": 8, "rec_state": N, "rec_head": 8}
     cfg["train"].update(steps=12, batch=8, warmup=2, device="cpu", log_every=10, final_eval=False)
     out = {}
     for name, kw in {"drop1": {"rec_drop": 1.0}, "nocarry": {"rec_carry": False},
@@ -146,3 +149,50 @@ def test_rec_drop_one_equals_no_carry(tmp_path):
     same = lambda a, b: all(torch.equal(out[a][k], out[b][k]) for k in out[a])
     assert same("drop1", "nocarry")
     assert not same("drop5", "carry") and not same("drop5", "nocarry")
+
+
+def _sched(**kw):
+    t = dict(train.DEFAULTS["train"], lr=1.0, warmup=10, steps=110, sched="wsd", **kw)
+    return [train.lr_at(s, t) for s in range(t["steps"])]
+
+
+@pytest.mark.parametrize("shape", ["sqrt", "linear"])
+def test_wsd_warms_up_holds_then_decays_the_last_share(shape):
+    lr = _sched(decay=0.2, decay_shape=shape)          # decay over the last 22 steps
+    assert lr[9] == 1.0 and lr[0] == pytest.approx(0.1)
+    assert all(v == 1.0 for v in lr[10:88])
+    tail = lr[88:]
+    assert all(a > b for a, b in zip(tail, tail[1:])) and 0 < tail[-1] < 0.25
+    p = (100 - 88) / 22
+    assert lr[100] == pytest.approx(1 - (p ** 0.5 if shape == "sqrt" else p))
+
+
+def test_wsd_longer_horizon_keeps_the_stable_prefix():
+    """A stable-phase pause can be resumed with a longer horizon: the
+    schedule up to the old decay start is unchanged."""
+    short, long = _sched(), [train.lr_at(s, dict(train.DEFAULTS["train"], lr=1.0, warmup=10,
+                                                  steps=220, sched="wsd")) for s in range(220)]
+    assert short[:88] == long[:88]
+
+
+def test_unknown_schedule_is_rejected():
+    with pytest.raises(ValueError):
+        _sched(decay_shape="cubic")
+    with pytest.raises(ValueError):
+        train.lr_at(500, dict(train.DEFAULTS["train"], sched="cosin"))
+
+
+@need
+def test_quick_val_and_periodic_samples_are_logged(tmp_path):
+    import json
+    cfg = copy.deepcopy(train.DEFAULTS)
+    cfg["model"] = {"kind": "transformer", "d": 32, "L": 1, "H": 2, "T": 32}
+    cfg["train"].update(steps=8, batch=4, warmup=1, device="cpu", log_every=4, val_every=4,
+                        val_frac=64, eval_every=4, eval_samples=2, eval_sample_len=8,
+                        final_eval=False)
+    cfg["name"] = "v"
+    train.run(cfg, out_root=tmp_path)
+    recs = [json.loads(l) for l in (tmp_path / "v-s42/metrics.jsonl").read_text().splitlines()]
+    assert [r["step"] for r in recs if "val_quick" in r] == [4]
+    blob = (tmp_path / "v-s42/samples/0000004.bin").read_bytes()
+    assert blob.count(b"\x03\n") == 2 and len(blob) == 2 * (8 + 2)

@@ -378,7 +378,8 @@ class ByteTransformer(ByteLM):
                  softcap: float = 0.0, qk_norm: bool = True,
                  stem: str = "embed", stem_dim: int = 32, qkv_conv: int = 0,
                  logit_quant: str = "none", qat: QAT | dict | None = None,
-                 rec: str = "none", rec_conv: int = 4, rec_chunk: int = 32):
+                 rec: str = "none", rec_conv: int = 4, rec_chunk: int = 32,
+                 rec_state: int = 1, rec_head: int = 16):
         """stem "embed": tied 256 x d embedding / output head (baseline).
         stem "conv": 256 x stem_dim embedding -> causal conv stem_dim -> d
         (kernel 4) -> + causal depthwise conv (kernel 4, dilation 2) on
@@ -386,7 +387,8 @@ class ByteTransformer(ByteLM):
         qkv_conv k > 0: Primer-style causal depthwise conv on q, k, v.
         rec "lru" (plan 002): a gated diagonal linear recurrence after every
         block (models/recurrent.py); its state is carried across windows
-        through forward_state."""
+        through forward_state. rec_state N > 1: a P x N state per head of
+        rec_head = P channels (chunked SSD form, plan 002 N3a)."""
         super().__init__()
         self.d, self.L, self.H, self.T = d, L, H, T
         self.zloss, self.softcap, self.stem = zloss, softcap, stem
@@ -418,7 +420,8 @@ class ByteTransformer(ByteLM):
         self.rec = rec
         if rec != "none":
             from intgrad.models.recurrent import RecMix
-            self.recs = nn.ModuleList(RecMix(d, L, conv=rec_conv, chunk=rec_chunk) for _ in range(L))
+            self.recs = nn.ModuleList(RecMix(d, L, conv=rec_conv, chunk=rec_chunk, state=rec_state,
+                                           head=rec_head) for _ in range(L))
         self.nf = nn.RMSNorm(d)
         self._rope = None
 
@@ -455,7 +458,7 @@ class ByteTransformer(ByteLM):
                       reset: torch.Tensor | None = None, tap: Tap | None = None,
                       mid_hook=None) -> tuple[torch.Tensor, list | None]:
         """Like forward, with the recurrent state carried in and out:
-        state = per-layer [B, d_rec] (None = zeros); reset [B, T] bool marks
+        state = per-layer [B, d_rec] or [B, H, P, N] (None = zeros); reset [B, T] bool marks
         document starts (the carried state is dropped there). Returns
         (logits, new state); the new state is None without recurrence."""
         h = _q(self.qs, "emb", self.embed(x))

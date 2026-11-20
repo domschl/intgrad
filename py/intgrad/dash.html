@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>intgrad runs</title>
+<style>
+:root {
+  --bg: #f6f6f3; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #8a897f;
+  --grid: #e1e0d9; --line: #cfcec6; --accent: #2a78d6;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --run: #1baf7a; --stop: #e34948; --pause: #eda100;
+  --f-body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: ui-monospace, "SFMono-Regular", Menlo, "DejaVu Sans Mono", monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8d8c84;
+  --grid: #2c2c2a; --line: #3a3a37; --accent: #3987e5;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c; --s7: #9085e9; --s8: #e66767;
+  --run: #199e70; --stop: #e66767; --pause: #c98500;
+} }
+:root[data-theme="dark"] {
+  --bg: #121211; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8d8c84;
+  --grid: #2c2c2a; --line: #3a3a37; --accent: #3987e5;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #0ca30c; --s7: #9085e9; --s8: #e66767;
+  --run: #199e70; --stop: #e66767; --pause: #c98500;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 var(--f-body); }
+main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; justify-content: space-between; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 13px; margin: 0; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.06em; }
+.sub { color: var(--ink-2); font-size: 13px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: grid; gap: 10px; min-width: 0; align-content: start; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; justify-content: space-between; }
+.ctl { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 13px; flex-wrap: wrap; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { font: 500 12px var(--f-body); color: var(--ink-2); background: var(--surface); border: 0; padding: 5px 10px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+select, input[type=search] { font: 13px var(--f-body); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; max-width: 100%; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.scroll { overflow-x: auto; }
+.tall { max-height: 420px; overflow: auto; border-bottom: 1px solid var(--grid); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: right; padding: 5px 7px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { font: 500 11px var(--f-mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); position: sticky; top: 0; background: var(--surface); z-index: 1; }
+th.l, td.l { text-align: left; }
+td { font-family: var(--f-mono); }
+td.name { font-family: var(--f-body); }
+tr.sel td.name { font-weight: 600; }
+tbody tr:hover { background: color-mix(in srgb, var(--grid) 45%, transparent); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 2px solid var(--line); vertical-align: -1px; margin-right: 6px; }
+.st { display: inline-flex; align-items: center; gap: 5px; font-family: var(--f-body); }
+.st i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.st.running i { background: var(--run); box-shadow: 0 0 0 3px color-mix(in srgb, var(--run) 25%, transparent); }
+.st.stopped i { background: var(--stop); }
+.st.paused i { background: var(--pause); }
+.prog { display: inline-block; width: 64px; height: 6px; border-radius: 3px; background: var(--grid); vertical-align: 1px; margin-right: 6px; overflow: hidden; }
+.prog b { display: block; height: 100%; background: var(--ink-2); }
+.muted { color: var(--muted); }
+.chart { position: relative; }
+.chart svg { display: block; width: 100%; height: auto; }
+svg text { font: 11px var(--f-mono); fill: var(--ink-2); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; font: 12px/1.45 var(--f-mono); color: var(--ink); box-shadow: 0 4px 16px rgb(0 0 0 / 0.14); min-width: 200px; display: none; z-index: 2; }
+.tip .h { color: var(--muted); margin-bottom: 4px; }
+.tip .r { display: flex; gap: 8px; justify-content: space-between; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
+.legend span { display: inline-flex; align-items: center; }
+.grid2 { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); }
+.samples { display: grid; gap: 10px; max-height: 70vh; overflow: auto; }
+.samples pre { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--grid); border-radius: 8px;
+  font: 12.5px/1.5 var(--f-mono); white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+.empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+.note { color: var(--muted); font-size: 12px; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>intgrad runs</h1>
+    <div class="sub">
+      <span id="upd">loading…</span>
+      <label class="ctl">refresh
+        <select id="every"><option value="5">5 s</option><option value="15" selected>15 s</option><option value="60">60 s</option><option value="0">off</option></select>
+      </label>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="bar">
+      <h2>Runs</h2>
+      <div class="ctl">
+        <input type="search" id="filter" placeholder="filter runs" aria-label="filter runs">
+        <div class="seg" id="show"><button data-v="all">all</button><button data-v="recent">last 7 days</button><button data-v="active">active</button></div>
+      </div>
+    </div>
+    <div class="scroll tall"><table id="runs"></table></div>
+    <p class="note">Tick runs to plot them (up to 8). "base" sets the reference for Δ and the config diff.</p>
+  </section>
+
+  <section class="panel">
+    <div class="bar">
+      <h2>Curves</h2>
+      <div class="ctl">
+        <div class="seg" id="metric"><button data-v="train">train</button><button data-v="quick">quick val</button><button data-v="eval">eval-v1</button><button data-v="lr">lr</button></div>
+        <div class="seg" id="smooth" title="exponential moving average of the logged train loss"><button data-v="0">raw</button><button data-v="1">smoothed</button></div>
+        <div class="seg" id="xr"><button data-v="all">all steps</button><button data-v="tail">last half</button></div>
+      </div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="chart" id="chart"><div class="tip" id="tip"></div></div>
+  </section>
+
+  <div class="grid2">
+    <section class="panel">
+      <h2>Eval-v1 by source (latest eval)</h2>
+      <div class="scroll" id="sources"></div>
+    </section>
+    <section class="panel">
+      <h2>Config vs base</h2>
+      <div class="scroll" id="cfgdiff"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="bar">
+      <h2>Samples</h2>
+      <div class="ctl">
+        <select id="srun" aria-label="run"></select>
+        <select id="sstep" aria-label="step"></select>
+      </div>
+    </div>
+    <div class="samples" id="samples"></div>
+  </section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const KEY = "ig-dash-v1";
+let st = { sel: [], colors: {}, base: null, metric: "train", smooth: "1", xr: "all", show: "all", filter: "", srun: null, sstep: null };
+try { Object.assign(st, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {} };
+{ // links like /?sel=a,b&base=a&metric=eval select runs (and keep them)
+  const q = new URLSearchParams(location.search);
+  if (q.get("sel")) { st.sel = q.get("sel").split(",").slice(0, 8); st.colors = {}; st.sel.forEach((n, i) => st.colors[n] = i + 1); }
+  for (const k of ["base", "metric", "smooth", "xr", "show", "srun"]) if (q.get(k)) st[k] = q.get(k);
+}
+
+let runs = [], curves = {}, timer = null;
+const f4 = v => v == null ? "–" : v.toFixed(4);
+const f3 = v => v == null ? "–" : v.toFixed(3);
+const dur = s => s == null ? "" : s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min` : `${Math.max(1, Math.round(s / 60))} min`;
+const color = n => st.colors[n] ? `var(--s${st.colors[n]})` : "var(--muted)";
+
+function assignColor(n) {
+  const used = new Set(st.sel.filter(x => x !== n).map(x => st.colors[x]));
+  if (st.colors[n] && !used.has(st.colors[n])) return;
+  for (let i = 1; i <= 8; i++) if (!used.has(i)) { st.colors[n] = i; return; }
+}
+
+/* ---------------- data ---------------- */
+async function refresh() {
+  try {
+    runs = await (await fetch("/api/runs")).json();
+    runs.sort((a, b) => b.created - a.created);
+    const live = new Set(runs.map(r => r.name));
+    st.sel = st.sel.filter(n => live.has(n));
+    await Promise.all(st.sel.map(async n => { curves[n] = await (await fetch(`/api/run?name=${encodeURIComponent(n)}`)).json(); }));
+    $("#upd").textContent = `${runs.length} runs · ${runs.filter(r => r.status === "running").length} running · updated ${new Date().toLocaleTimeString()}`;
+    renderAll();
+  } catch (e) {
+    $("#upd").textContent = `ig-dash not reachable (${e.message})`;
+  }
+}
+function schedule() {
+  clearInterval(timer);
+  const s = +$("#every").value;
+  if (s) timer = setInterval(refresh, s * 1000);
+}
+
+/* ---------------- runs table ---------------- */
+function visibleRuns() {
+  const now = Date.now() / 1000, q = st.filter.toLowerCase();
+  return runs.filter(r => (!q || r.name.toLowerCase().includes(q)) &&
+    (st.show !== "active" || r.status === "running" || r.status === "paused") &&
+    (st.show !== "recent" || now - r.created < 7 * 86400 || st.sel.includes(r.name)));
+}
+function renderRuns() {
+  const base = runs.find(r => r.name === st.base);
+  let h = `<thead><tr><th class="l">plot</th><th class="l">run</th><th class="l">status</th><th class="l">progress</th>
+    <th>train</th><th>quick val</th><th>eval-v1</th><th>Δ base</th><th title="eval with the recurrent state carried (position.json)">carried</th><th title="share of the run's own cold-vs-warm gap closed by the carried state (first 64 B of continuation windows)">closed</th><th>kB/s</th><th class="l">git</th><th>base</th></tr></thead><tbody>`;
+  for (const r of visibleRuns()) {
+    const on = st.sel.includes(r.name);
+    const pct = r.steps ? Math.min(100, 100 * r.step / r.steps) : 0;
+    const prog = r.status === "done" ? `<span class="muted">${r.steps} steps</span>`
+      : `<span class="prog"><b style="width:${pct.toFixed(1)}%"></b></span>${r.step}/${r.steps}${r.eta_s ? ` <span class="muted">· ${dur(r.eta_s)} left</span>` : ""}`;
+    const d = base && r.eval != null && base.eval != null && r.name !== base.name ? r.eval - base.eval : null;
+    const evs = r.eval == null ? "–" : `${f4(r.eval)}${r.final ? "" : ` <span class="muted">@${r.eval_step}</span>`}`;
+    const stale = r.status === "stopped" ? ` <span class="muted">${dur(r.age_s)} ago</span>` : "";
+    h += `<tr class="${on ? "sel" : ""}">
+      <td class="l"><input type="checkbox" data-sel="${esc(r.name)}" ${on ? "checked" : ""} ${!on && st.sel.length >= 8 ? "disabled" : ""} aria-label="plot ${esc(r.name)}"></td>
+      <td class="l name"><span class="sw" style="${on ? `background:${color(r.name)};border-color:${color(r.name)}` : ""}"></span>${esc(r.name)}</td>
+      <td class="l"><span class="st ${r.status}"><i></i>${r.status}</span>${stale}</td>
+      <td class="l">${prog}</td>
+      <td>${f4(r.train)}</td><td>${f4(r.quick)}</td><td>${evs}</td>
+      <td>${d == null ? "–" : (d > 0 ? "+" : "−") + Math.abs(d).toFixed(4)}</td>
+      <td>${f4(r.carried)}</td><td>${r.closed == null ? "–" : (100 * r.closed).toFixed(0) + "%"}</td>
+      <td>${r.kB_per_s ?? "–"}</td><td class="l muted">${esc(r.git || "")}</td>
+      <td><input type="radio" name="base" data-base="${esc(r.name)}" ${st.base === r.name ? "checked" : ""} aria-label="base ${esc(r.name)}"></td></tr>`;
+  }
+  $("#runs").innerHTML = h + "</tbody>";
+}
+$("#runs").addEventListener("change", async e => {
+  const n = e.target.dataset.sel, b = e.target.dataset.base;
+  if (n) {
+    if (e.target.checked) { st.sel.push(n); assignColor(n); curves[n] = await (await fetch(`/api/run?name=${encodeURIComponent(n)}`)).json(); }
+    else st.sel = st.sel.filter(x => x !== n);
+  }
+  if (b) st.base = b;
+  save(); renderAll();
+});
+
+/* ---------------- chart ---------------- */
+function series() {
+  return st.sel.filter(n => curves[n]).map(n => {
+    const c = curves[n];
+    let pts;
+    if (st.metric === "train" || st.metric === "lr") {
+      pts = c.train.map(p => [p[0], st.metric === "lr" ? p[2] : p[1]]);
+      if (st.metric === "train" && st.smooth === "1") {
+        let m = null; pts = pts.map(([x, y]) => [x, m = m == null ? y : 0.7 * m + 0.3 * y]);
+      }
+    } else if (st.metric === "quick") pts = c.quick;
+    else pts = c.eval.map(p => [p[0], p[1]]);
+    return { n, pts, col: color(n) };
+  }).filter(s => s.pts.length);
+}
+function nice(lo, hi, n) {
+  const span = hi - lo || Math.abs(hi) || 1, raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(k => k * mag).find(s => span / s <= n) || 10 * mag;
+  const t = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) t.push(+v.toPrecision(10));
+  return { t, step };
+}
+function renderChart() {
+  const el = $("#chart"), tip = $("#tip");
+  const S = series();
+  el.querySelectorAll("svg, .empty").forEach(x => x.remove());
+  $("#legend").innerHTML = S.length > 1 ? S.map(s => `<span><span class="sw" style="background:${s.col};border-color:${s.col}"></span>${esc(s.n)}</span>`).join("") : "";
+  if (!S.length) {
+    el.insertAdjacentHTML("beforeend", `<div class="empty">${st.sel.length ? "No points for this metric yet (quick val needs train.val_every, eval-v1 needs train.eval_every)." : "Tick runs in the table to plot them."}</div>`);
+    return;
+  }
+  const W = Math.max(320, el.clientWidth), narrow = W < 600, H = narrow ? 260 : 340;
+  const m = { l: 56, r: S.length <= 4 && !narrow ? 150 : 16, t: 12, b: 30 };
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const xmaxAll = Math.max(...S.flatMap(s => s.pts.map(p => p[0])));
+  const x0 = st.xr === "tail" ? xmaxAll / 2 : 0;
+  const inView = p => p[0] >= x0;
+  // y range: ignore the first 10% of steps for losses (warm-up values dwarf the rest)
+  const yfloor = st.metric === "lr" || st.metric === "eval" ? x0 : Math.max(x0, 0.1 * xmaxAll);
+  let ys = S.flatMap(s => s.pts.filter(p => p[0] >= yfloor).map(p => p[1]));
+  if (!ys.length) ys = S.flatMap(s => s.pts.map(p => p[1]));
+  let ylo = Math.min(...ys), yhi = Math.max(...ys);
+  if (st.metric === "lr") ylo = 0;
+  const pad = (yhi - ylo) * 0.06 || 0.01; ylo -= st.metric === "lr" ? 0 : pad; yhi += pad;
+  const X = v => m.l + (v - x0) / (xmaxAll - x0 || 1) * iw, Y = v => m.t + (1 - (v - ylo) / (yhi - ylo)) * ih;
+  const yt = nice(ylo, yhi, 6), xt = nice(x0, xmaxAll, narrow ? 4 : 8);
+  const fy = v => st.metric === "lr" ? v.toExponential(1) : v.toFixed(yt.step < 0.01 ? 3 : 2);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(st.metric)} by step"><defs><clipPath id="clip"><rect x="${m.l}" y="${m.t}" width="${iw}" height="${ih}"/></clipPath></defs>`;
+  yt.t.forEach(v => { s += `<line x1="${m.l}" x2="${m.l + iw}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${Y(v) + 4}" text-anchor="end">${fy(v)}</text>`; });
+  xt.t.forEach(v => { s += `<line x1="${X(v)}" x2="${X(v)}" y1="${m.t + ih}" y2="${m.t + ih + 4}" stroke="var(--muted)"/><text x="${X(v)}" y="${m.t + ih + 18}" text-anchor="middle">${v}</text>`; });
+  s += `<line x1="${m.l}" x2="${m.l + iw}" y1="${m.t + ih}" y2="${m.t + ih}" stroke="var(--line)"/><g clip-path="url(#clip)">`;
+  for (const sr of S) {
+    const p = sr.pts.filter(inView);
+    if (p.length > 1) s += `<polyline fill="none" stroke="${sr.col}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${p.map(q => `${X(q[0]).toFixed(1)},${Y(q[1]).toFixed(1)}`).join(" ")}"/>`;
+    if (st.metric === "eval" || p.length === 1) p.forEach(q => { s += `<circle cx="${X(q[0])}" cy="${Y(q[1])}" r="4" fill="${sr.col}" stroke="var(--surface)" stroke-width="2"/>`; });
+  }
+  s += `</g>`;
+  if (m.r > 100) {               // direct labels at the line ends, nudged apart
+    const ends = S.map(sr => { const l = sr.pts[sr.pts.length - 1]; return { sr, y: Math.min(m.t + ih, Math.max(m.t, Y(l[1]))) }; }).sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 14);
+    ends.forEach(e => { s += `<text x="${m.l + iw + 8}" y="${e.y + 4}" style="fill:var(--ink)">${esc(e.sr.n.length > 20 ? e.sr.n.slice(0, 19) + "…" : e.sr.n)}</text>`; });
+  }
+  s += `<line id="xh" y1="${m.t}" y2="${m.t + ih}" stroke="var(--muted)" visibility="hidden"/><g id="dots"></g>`;
+  s += `<rect id="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/></svg>`;
+  el.insertAdjacentHTML("beforeend", s);
+  const svg = el.querySelector("svg"), xh = svg.querySelector("#xh"), dots = svg.querySelector("#dots");
+  const move = ev => {
+    const r = svg.getBoundingClientRect(), sx = (ev.clientX - r.left) * W / r.width;
+    const step = x0 + (sx - m.l) / iw * (xmaxAll - x0);
+    const rows = S.map(sr => {
+      const p = sr.pts.filter(inView); if (!p.length) return null;
+      let best = p[0]; for (const q of p) if (Math.abs(q[0] - step) < Math.abs(best[0] - step)) best = q;
+      return { sr, q: best };
+    }).filter(Boolean);
+    if (!rows.length) return;
+    const xs = rows[0].q[0];
+    xh.setAttribute("x1", X(xs)); xh.setAttribute("x2", X(xs)); xh.setAttribute("visibility", "visible");
+    dots.innerHTML = rows.map(o => `<circle cx="${X(o.q[0])}" cy="${Y(o.q[1])}" r="4.5" fill="${o.sr.col}" stroke="var(--surface)" stroke-width="2"/>`).join("");
+    rows.sort((a, b) => a.q[1] - b.q[1]);
+    tip.innerHTML = `<div class="h">step ${xs}</div>` + rows.map(o => `<div class="r"><span><span class="sw" style="background:${o.sr.col};border-color:${o.sr.col}"></span>${esc(o.sr.n)}</span><span>${st.metric === "lr" ? o.q[1].toExponential(2) : o.q[1].toFixed(4)}</span></div>`).join("");
+    tip.style.display = "block";
+    const er = el.getBoundingClientRect(), tw = tip.offsetWidth;
+    let left = ev.clientX - er.left + 14; if (left + tw > er.width) left = ev.clientX - er.left - tw - 14;
+    tip.style.left = Math.max(0, left) + "px"; tip.style.top = (ev.clientY - er.top + 12) + "px";
+  };
+  const leave = () => { tip.style.display = "none"; xh.setAttribute("visibility", "hidden"); dots.innerHTML = ""; };
+  svg.querySelector("#hit").addEventListener("pointermove", move);
+  svg.querySelector("#hit").addEventListener("pointerleave", leave);
+}
+
+/* ---------------- sources and config ---------------- */
+function renderSources() {
+  const R = st.sel.map(n => runs.find(r => r.name === n)).filter(r => r && Object.keys(r.sources).length);
+  const base = runs.find(r => r.name === st.base);
+  if (!R.length) { $("#sources").innerHTML = `<div class="empty">No eval-v1 results for the plotted runs yet.</div>`; return; }
+  const keys = [...new Set(R.flatMap(r => Object.keys(r.sources)))].sort();
+  let h = `<table><thead><tr><th class="l">source</th>${R.map(r => `<th><span class="sw" style="background:${color(r.name)};border-color:${color(r.name)}"></span>${esc(r.name)}</th>`).join("")}</tr></thead><tbody>`;
+  for (const k of ["all", ...keys]) {
+    h += `<tr><td class="l name">${k === "all" ? "<b>all</b>" : esc(k)}</td>` + R.map(r => {
+      const v = k === "all" ? r.eval : r.sources[k], b = base && r.name !== base.name ? (k === "all" ? base.eval : base.sources[k]) : null;
+      const d = v != null && b != null ? ` <span class="muted">${v - b > 0 ? "+" : "−"}${Math.abs(v - b).toFixed(3)}</span>` : "";
+      return `<td>${f3(v)}${d}</td>`;
+    }).join("") + "</tr>";
+  }
+  $("#sources").innerHTML = h + "</tbody></table>" + (base ? `<p class="note">grey: Δ vs base ${esc(base.name)}</p>` : "");
+}
+function renderCfg() {
+  const base = runs.find(r => r.name === st.base);
+  const R = st.sel.map(n => runs.find(r => r.name === n)).filter(r => r && r !== base);
+  if (!base) { $("#cfgdiff").innerHTML = `<div class="empty">Pick a base run in the table.</div>`; return; }
+  if (!R.length) { $("#cfgdiff").innerHTML = `<div class="empty">Tick runs to compare their config with ${esc(base.name)}.</div>`; return; }
+  const skip = new Set(["name", "train.device"]);
+  const keys = [...new Set(R.flatMap(r => Object.keys(r.config)).concat(Object.keys(base.config)))]
+    .filter(k => !skip.has(k) && R.some(r => JSON.stringify(r.config[k]) !== JSON.stringify(base.config[k]))).sort();
+  if (!keys.length) { $("#cfgdiff").innerHTML = `<div class="empty">Same config as ${esc(base.name)}.</div>`; return; }
+  const v = x => x === undefined ? `<span class="muted">default</span>` : esc(JSON.stringify(x));
+  $("#cfgdiff").innerHTML = `<table><thead><tr><th class="l">key</th><th class="l">${esc(base.name)} (base)</th>${R.map(r => `<th class="l"><span class="sw" style="background:${color(r.name)};border-color:${color(r.name)}"></span>${esc(r.name)}</th>`).join("")}</tr></thead><tbody>` +
+    keys.map(k => `<tr><td class="l">${esc(k)}</td><td class="l">${v(base.config[k])}</td>${R.map(r => `<td class="l">${JSON.stringify(r.config[k]) === JSON.stringify(base.config[k]) ? `<span class="muted">same</span>` : v(r.config[k])}</td>`).join("")}</tr>`).join("") + "</tbody></table>";
+}
+
+/* ---------------- samples ---------------- */
+async function renderSamples(force) {
+  const rs = $("#srun"), ss = $("#sstep");
+  const opts = runs.filter(r => st.sel.includes(r.name) || r.name === st.srun);
+  if (!st.srun || !runs.find(r => r.name === st.srun)) st.srun = st.sel[0] || null;
+  rs.innerHTML = opts.length ? opts.map(r => `<option ${r.name === st.srun ? "selected" : ""}>${esc(r.name)}</option>`).join("") : `<option value="">tick a run</option>`;
+  const c = st.srun && (curves[st.srun] || (curves[st.srun] = await (await fetch(`/api/run?name=${encodeURIComponent(st.srun)}`)).json()));
+  const steps = c ? c.samples.map(String) : [];
+  if (!steps.includes(String(st.sstep))) { st.sstep = steps[steps.length - 1] || null; force = true; }
+  ss.innerHTML = steps.length ? steps.map(s => `<option value="${s}" ${s === String(st.sstep) ? "selected" : ""}>${s === "final" ? "final" : "step " + s}</option>`).join("") : `<option value="">no samples</option>`;
+  if (!force) return;
+  const box = $("#samples");
+  if (!st.sstep) { box.innerHTML = `<div class="empty">No samples for this run. Set train.eval_samples (with eval_every) or train.samples.</div>`; return; }
+  const txt = await (await fetch(`/api/samples?name=${encodeURIComponent(st.srun)}&step=${st.sstep}`)).json();
+  box.innerHTML = txt.map(t => `<pre>${esc(t)}</pre>`).join("") || `<div class="empty">empty</div>`;
+}
+$("#srun").addEventListener("change", e => { st.srun = e.target.value; st.sstep = null; save(); renderSamples(true); });
+$("#sstep").addEventListener("change", e => { st.sstep = e.target.value; save(); renderSamples(true); });
+
+/* ---------------- controls ---------------- */
+function bindSeg(id, key) {
+  const el = $(id);
+  const paint = () => el.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === st[key])));
+  el.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; st[key] = b.dataset.v; save(); paint(); renderAll(); });
+  paint();
+}
+bindSeg("#metric", "metric"); bindSeg("#smooth", "smooth"); bindSeg("#xr", "xr"); bindSeg("#show", "show");
+$("#filter").value = st.filter;
+$("#filter").addEventListener("input", e => { st.filter = e.target.value; save(); renderRuns(); });
+$("#every").addEventListener("change", schedule);
+let lastSamplesKey = "";
+function renderAll() {
+  renderRuns(); renderChart(); renderSources(); renderCfg();
+  const k = `${st.srun}|${st.sstep}|${st.srun && curves[st.srun] ? curves[st.srun].samples.length : 0}`;
+  renderSamples(k !== lastSamplesKey); lastSamplesKey = k;
+}
+let rz; addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(renderChart, 120); });
+refresh(); schedule();
+</script>
+</body>
+</html>

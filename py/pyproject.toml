@@ -18,6 +18,7 @@ ig-make-split = "intgrad.corpus.make_split:main"
 ig-eval-freeze = "intgrad.eval_set:main"
 ig-train = "intgrad.train:main"
 ig-position = "intgrad.position:main"
+ig-dash = "intgrad.dash:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

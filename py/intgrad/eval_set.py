@@ -59,6 +59,13 @@ class EvalSet:
         self.src = np.frombuffer((path / f"{bucket}.src").read_bytes(), dtype=np.uint8)
         self.sources: list[str] = self.meta["sources"]
 
+    def subset(self, every: int) -> "EvalSet":
+        """Every k-th chunk (a fixed, source-mixed slice for quick estimates)."""
+        sub = object.__new__(EvalSet)
+        sub.meta, sub.sources = self.meta, self.sources
+        sub.chunks, sub.src = self.chunks[::every], self.src[::every]
+        return sub
+
 
 def report(bits: np.ndarray, src: np.ndarray, sources: list[str]) -> dict:
     """bits: [N, L-1] bits per predicted byte -> mean, SE, per source."""

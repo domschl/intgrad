@@ -6,8 +6,17 @@ Run directory runs/<name>-<seed>/:
     config.toml   resolved config      meta.json     git hash, index/eval hashes
     metrics.jsonl one record per log/eval step   ckpt.pt  model+optimizer+batcher
 
-Schedule = the C trainer's: linear warmup to lr, then cosine to 0 at
-train.steps (the total horizon). Loss = mean CE over the batch.
+Schedule: linear warmup to lr, then
+    sched "cosine"  cosine to 0 at train.steps (the total horizon; the C trainer's)
+    sched "wsd"     warmup-stable-decay: lr held, then the last train.decay share
+                    of steps decays to 0, shape "sqrt" (1 - sqrt(p)) or "linear".
+                    A paused stable-phase run (train.stop) can be resumed with a
+                    longer train.steps: the decay moves with the horizon.
+Loss = mean CE over the batch.
+
+Live logging (ig-dash reads it): val_every > 0 logs a quick val estimate on
+every val_frac-th eval-v1 chunk; eval_samples > 0 writes that many samples
+of eval_sample_len bytes to samples/<step>.bin at each eval_every point.
 """
 from __future__ import annotations
 
@@ -40,6 +49,9 @@ DEFAULTS = {
               "acts": False, "resid": "fp", "softmax": "none", "probs": False},
     "train": {"steps": 4000, "batch": 32, "lr": 2e-3, "wd": 0.1, "warmup": 200,
               "sched": "cosine", "seed": 42, "log_every": 100, "eval_every": 0,
+              "decay": 0.2, "decay_shape": "sqrt",   # sched "wsd"
+              "val_every": 0, "val_frac": 8,         # quick val: every val_frac-th eval chunk
+              "eval_samples": 0, "eval_sample_len": 256,
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
               "telemetry_every": 0, "samples": 0, "sample_len": 1024,
               "compile": False, "final_eval": True, "betas": [0.9, 0.99],
@@ -111,7 +123,7 @@ def build_model(cfg: dict, qc: QuantConfig, gen: torch.Generator):
         else:
             kw = {k: m[k] for k in ("d", "L", "H", "T", "zloss", "softcap", "qk_norm",
                                     "stem", "stem_dim", "qkv_conv", "logit_quant",
-                                    "rec", "rec_conv", "rec_chunk") if k in m}
+                                    "rec", "rec_conv", "rec_chunk", "rec_state", "rec_head") if k in m}
             model = transformer.build(m.get("preset"), qat=qat, **kw)
         for p in model.parameters():          # weights start on their grid
             qc.project_(p)
@@ -180,7 +192,31 @@ def lr_at(step: int, t: dict) -> float:
         return lr * (step + 1) / warm
     if t["sched"] == "cosine" and steps > warm:
         return lr * 0.5 * (1.0 + math.cos(math.pi * (step - warm) / (steps - warm)))
+    if t["sched"] == "wsd":
+        s0 = max(warm, steps - round(t["decay"] * steps))
+        if step < s0 or steps <= s0:
+            return lr
+        p = (step - s0) / (steps - s0)
+        if t["decay_shape"] == "sqrt":
+            return lr * (1.0 - math.sqrt(p))
+        if t["decay_shape"] == "linear":
+            return lr * (1.0 - p)
+        raise ValueError(f"train.decay_shape {t['decay_shape']!r}")
+    if t["sched"] != "const":
+        raise ValueError(f"train.sched {t['sched']!r}")
     return lr
+
+
+def write_samples(model, path: Path, n: int, length: int, seed: int, dev) -> list[bytes]:
+    """n samples of length bytes from an EOD prompt (own generator: the
+    training RNG streams are untouched), each terminated by 0x03 0x0a."""
+    g = torch.Generator(device=dev).manual_seed(seed)
+    prompt = torch.full((n, 1), data.EOD, dtype=torch.uint8, device=dev)
+    with torch.no_grad():
+        blobs = [bytes(r) for r in model.sample(prompt, length, generator=g).cpu().numpy()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(r + b"\x03\n" for r in blobs))
+    return blobs
 
 
 def blake(path: Path) -> str:
@@ -238,7 +274,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     fwd = torch.compile(model) if t["compile"] else model
     rec = getattr(model, "rec", "none") != "none"      # plan 002 recurrent branch
     fwd_state = (torch.compile(model.forward_state) if t["compile"] else model.forward_state) if rec else None
-    rstate = None                                      # per-layer [S, d_rec], one row per stream
+    rstate = None                                      # per-layer [S, d_rec] (or [S, H, P, N]), one row per stream
     kind = cfg["data"]["batcher"]
     if kind not in ("random", "sequential"):
         raise ValueError(f"data.batcher {kind!r}")
@@ -246,6 +282,7 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     bkw = {"streams": cfg["data"]["streams"]} if kind == "sequential" else {}
     batcher = Batcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"], **bkw)
     ev = EvalSet(ev_path, "val")
+    ev_quick = ev.subset(t["val_frac"]) if t["val_every"] else None
     start = 0
     if resume:
         ck = torch.load(run_dir / "ckpt.pt", map_location=dev, weights_only=False)
@@ -284,10 +321,10 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
             keep = None                                # N2b: random cold starts inside documents
             if carry and t["rec_drop"] > 0:
                 u = np.random.Generator(np.random.PCG64([t["seed"], 1 << 21, step])).random(len(x))
-                keep = torch.from_numpy(u >= t["rec_drop"]).to(dev)[:, None]
+                keep = torch.from_numpy(u >= t["rec_drop"]).to(dev)
             for i in range(0, len(x), mb):
                 if rec:
-                    s_in = [s[rows[i:i + mb]] if keep is None else s[rows[i:i + mb]] * keep[i:i + mb]
+                    s_in = [s[rows[i:i + mb]] if keep is None else s[rows[i:i + mb]] * keep[i:i + mb].view(-1, *[1] * (s.dim() - 1))
                             for s in rstate] if carry and rstate is not None else None
                     lg, s_out = fwd_state(x[i:i + mb], s_in, None if reset is None else reset[i:i + mb])
                     new_state.append([s.detach() for s in s_out])
@@ -318,11 +355,18 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
                 model(x[: max(1, len(x) // 4)], tap=tap)
             log.write(json.dumps({"step": step, "telemetry": tap.stats}) + "\n")
             log.flush()
+        if t["val_every"] and (step + 1) % t["val_every"] == 0 and step + 1 < t["steps"]:
+            r = peaks.eval(lambda: evaluate(model, ev_quick, dev))
+            log.write(json.dumps({"step": step + 1, "val_quick": {"bpb": r["bpb"], "se": r["se"]}}) + "\n")
+            log.flush()
         if t["eval_every"] and (step + 1) % t["eval_every"] == 0 and step + 1 < t["steps"]:
             r = peaks.eval(lambda: evaluate(model, ev, dev))
             log.write(json.dumps({"step": step + 1, "eval": r}) + "\n")
             log.flush()
             print(f"step {step + 1}: val {r['bpb']:.4f} ± {r['se']:.4f}", flush=True)
+            if t["eval_samples"] and not is_mlp:
+                write_samples(model, run_dir / "samples" / f"{step + 1:07d}.bin", t["eval_samples"],
+                              t["eval_sample_len"], t["seed"], dev)
     torch.save({"model": model.state_dict(), "opt": opt.state_dict(),
                 "batcher": batcher.state_dict(), "sr_gen": sr_gen.get_state(), "rec_state": rstate,
                 "step": end}, run_dir / "ckpt.pt")
@@ -333,11 +377,8 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
         final["eval_peak_gib"] = peaks.gib(peaks.ev)
     log.write(json.dumps({"step": end, "eval": final, "final": end == t["steps"]}) + "\n")
     if t["samples"] and not is_mlp:
-        g = torch.Generator(device=dev).manual_seed(t["seed"])
-        prompt = torch.full((t["samples"], 1), data.EOD, dtype=torch.uint8, device=dev)
-        smp = model.sample(prompt, t["sample_len"], generator=g).cpu().numpy()
-        blobs = [bytes(r) for r in smp]
-        (run_dir / "samples.bin").write_bytes(b"".join(r + b"\x03\n" for r in blobs))
+        blobs = write_samples(model, run_dir / "samples.bin", t["samples"], t["sample_len"],
+                              t["seed"], dev)
         final["utf8_valid"] = utf8_valid_fraction(blobs)
         log.write(json.dumps({"step": end, "samples": t["samples"],
                               "utf8_valid": final["utf8_valid"]}) + "\n")
