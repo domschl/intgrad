@@ -361,3 +361,27 @@ zero-initialised 512 × 512 W; the other seven blocks are N2b.
   Caveat: the expected benefit of nonlinear recurrence is state tracking
   (counting, nesting), which average bpb at 7M parameters may not show;
   revisit only if a state-tracking probe is added.
+
+### N2b — WSD schedule instead of cosine (2026-11-20)
+N2b s42 with `train.sched="wsd"`, decay share 0.2, 1−√p shape (lr 7.5e-4
+held from step 1000 to 7200, then decayed to 0 by 9000).
+
+| | N2b s42 (cosine) | N2b s43 (cosine) | N2b s42 (WSD 0.2) |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.490 | 1.489 | 1.533 |
+| books / text | 1.549 / 1.622 | 1.551 / 1.621 | 1.582 / 1.684 |
+| whole windows, zero state / carried | 1.448 / 1.410 | 1.444 / 1.406 | 1.503 / 1.469 |
+| first 64 B, carried | 1.601 | 1.586 | 1.676 |
+| gap closed, vs N1b | 52% | 55% | 47% |
+
+- **WSD 0.2 is clearly worse:** +0.043 on eval-v1, worse on every source.
+- The stable phase stalls: quick val 1.743 at step 6000, 1.738 at 7200
+  (cosine fell from 1.644 to 1.564 over the same steps); +0.17 behind at
+  the start of the decay.
+- The decay recovers 0.21 in 1800 steps and is still falling steeply at
+  the end (−0.02 per 200 steps): 20% decay is too short here. Likely
+  reason: Lion's sign update has a fixed step size, so at constant lr the
+  run sits on a noise floor and nearly all progress comes from annealing;
+  decoupled weight decay (lr·wd) also stays at its peak.
+- Cosine stays the default. WSD is only worth revisiting for runs that
+  must be extendable, with a much longer decay share (≥ 0.5).
