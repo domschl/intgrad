@@ -305,3 +305,25 @@ windows (blake2b 4bef4490…). Gap closed is measured against N1b (seed 42).
   50%), eval-v1 1.490 / 1.489 vs N1b's 1.505. Seed spread is small:
   0.0005 on eval-v1, 3 points on gap closed.
 - N1b exists on seed 42 only; both N2b seeds are measured against it.
+
+### N3a — state N = 16 (SSD form) (2026-11-20)
+N2b protocol (cosine, rec_drop 0.1, seed 42) with `model.rec_state=16`:
+heads of 16 channels, a 16 × 16 state per head, one decay per head.
+
+| | N2b s42 | N2b s43 | N3a s42 |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.490 | 1.489 | 1.501 |
+| books / text | 1.549 / 1.622 | 1.551 / 1.621 | 1.560 / 1.636 |
+| whole windows, zero state / carried | 1.448 / 1.410 | 1.444 / 1.406 | 1.458 / 1.422 |
+| first 64 B, carried | 1.601 | 1.586 | 1.605 |
+| gap closed, vs N1b | 52% | 55% | 51% |
+| throughput, peak memory | 58 kB/s, 5.4 GiB | 55 kB/s, 5.4 GiB | 50 kB/s, 6.6 GiB |
+
+- **N = 16 does not help:** +0.011 on eval-v1 (seed spread 0.0005),
+  worse on every source; the carried state closes no more of the gap.
+  Quick val trails N2b s43 from step 1000 on (+0.03 to +0.05 early, about
+  +0.012 at the end).
+- 16× the state did not buy cross-window information, so the remaining
+  gap is not (only) a state-capacity limit. Confound: the SSD form also
+  shares one decay over 16 channels (32 decay rates per layer instead of
+  512) and normalises k and q. Not separated by this run.
