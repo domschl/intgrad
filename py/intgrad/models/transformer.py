@@ -309,8 +309,12 @@ class ByteLM(nn.Module):
         return ce, ce
 
     def max_batch(self, cap: int = 64) -> int:
-        """Inference batch: explicit attention keeps <= 2^27 scores per tensor."""
+        """Inference batch: explicit attention keeps <= 2^27 scores per tensor;
+        activations are kept at <= 2^25 elements per tensor (64 x 1024 x 512,
+        the L preset), so wider or longer models score in smaller batches."""
         b = cap
+        while b > 1 and b * self.T * self.d > 1 << 25:
+            b //= 2
         if self.qat.explicit_attn:
             while b > 1 and b * self.attn_elems() > 1 << 27:
                 b //= 2

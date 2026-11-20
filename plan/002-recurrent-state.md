@@ -125,6 +125,33 @@ Order agreed 2026-11-20: a second N2b seed first (D6), then N3a, then N3b.
 - Long documents (books): does the state help beyond one window (the
   warm number)? Position curve over several windows.
 
+### N3c — Capacity within 12 GB (before N4)
+Agreed 2026-11-20: find the best fp model the card can train before
+quantizing, so N4 has a best-case reference. 300 MB is about 8 bytes per
+parameter at N2b's 36 M (plan 001 X23: a 90 M core got *worse* at
+300 MB), so capacity is tested on more data.
+1. N2b at 3× the data (900 MB, 27,465 steps, cosine over the full run):
+   does the 36 M model gain from data alone?
+2. Deeper N2b (d 512, 12 blocks, 54 M) on the same 900 MB. Depth before
+   width: the per-layer lr (7.5e-4, tuned at d 512) should still hold.
+   Width (d 768) only with an lr check.
+
+VRAM and speed of N2b sizes (60-step probes, sequential batcher, rec_drop
+0.1, fp32 master, compiled; params ≈ 17·L·d²):
+
+| d × blocks | params | micro-batch | peak train | speed | 900 MB |
+|---|---|---|---|---|---|
+| 512 × 8 (N2b) | 36 M | 8 | 5.4 GiB | 58.5 kB/s | 4.3 h |
+| 512 × 12 | 54 M | 8 | 8.0 GiB | 39.2 kB/s | 6.4 h |
+| 512 × 16 | 71 M | 4 | 6.2 GiB | 31.2 kB/s | 8.0 h |
+| 768 × 8 | 80 M | 8 | 8.4 GiB | 33.4 kB/s | 7.5 h |
+| 768 × 12 | 120 M | 4 | 7.5 GiB | 22.5 kB/s | 11.1 h |
+| 1024 × 8 | 143 M | 4 | 7.2 GiB | 21.6 kB/s | 11.6 h |
+
+512 × 16 and 768 × 12 do not fit at micro-batch 8. Memory is not the
+limit up to ~140 M; time is (speed scales with parameters). The eval
+batch now shrinks with T·d (it ran out of memory at d 1024).
+
 ### N4 — Byte numerics
 Quantized twin of the best N2/N3 variant (stage d, plan 001 M4). The decay
 needs its own grid. Range telemetry of h, a_t and the gates.
