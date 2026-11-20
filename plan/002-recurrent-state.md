@@ -251,3 +251,27 @@ Same recurrent model, state reset at every window (`train.rec_carry = false`).
   still gains on the first 64 B (1.714) but loses on whole windows
   (1.475): the state is usable but not trained to be.
 
+### N2b — carried state, 10% of states cleared per step (2026-11-20)
+`train.rec_drop = 0.1`: each step, 10% of the rows start from a zero
+state (random cold starts inside documents). Otherwise as N2 carry.
+
+| measure | N1b | N2 no carry | N2 carry | **N2b** |
+|---|---|---|---|---|
+| eval-v1 (zero state) | 1.505 | 1.491 | 1.521 | **1.490** |
+| books | 1.566 | 1.549 | 1.606 | 1.549 |
+| whole windows, carried | — | — | 1.408 | 1.410 |
+| first 64 B, cold / carried | 1.839 / — | 1.816 / — | 1.951 / 1.597 | 1.854 / **1.601** |
+| gap closed, vs N1b | — | — | 52% | **52%** |
+
+- **The cold-start loss is gone, the carried gain is kept:** eval-v1 1.490
+  (= no carry, −0.015 vs N1b), books back to 1.549; carried windows and
+  first 64 B within 0.004 of N2 carry.
+- By document age (64 × 160 windows), N2b at zero state vs N1b: whole
+  windows −0.017 to −0.021 from age 1 on (+0.008 at age 0); first 64 B
+  +0.01 to +0.04 (N2 carry: +0.09 to +0.32). Carried vs zero state: −0.03
+  per window at every age, −0.24 to −0.29 on the first 64 B. State rms
+  0.084–0.090 over 160 windows, no drift.
+- **D6:** 52% of the gap closed (bar 50%) and no eval-v1 regression: N2b
+  passes, on one seed. The 50% margin is small (2 points), so plan §3 asks
+  for a second seed before the claim is final.
+
