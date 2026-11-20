@@ -288,3 +288,20 @@ state (random cold starts inside documents). Otherwise as N2 carry.
   passes, on one seed. The 50% margin is small (2 points), so plan §3 asks
   for a second seed before the claim is final.
 
+
+### N2b — second seed (2026-11-20)
+Seed 43, same config (cosine, rec_drop 0.1), position eval on the same val
+windows (blake2b 4bef4490…). Gap closed is measured against N1b (seed 42).
+
+| | N1b s42 | N2b s42 | N2b s43 |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.505 | 1.490 | **1.489** |
+| books | 1.566 | 1.549 | 1.551 |
+| whole windows, zero state / carried | 1.459 / – | 1.448 / 1.410 | 1.444 / 1.406 |
+| first 64 B, cold / carried | 1.839 / – | 1.854 / 1.601 | 1.848 / 1.586 |
+| gap closed, vs N1b | – | 52% | **55%** |
+
+- **D6 confirmed on two seeds:** 52% and 55% of N1b's gap closed (bar
+  50%), eval-v1 1.490 / 1.489 vs N1b's 1.505. Seed spread is small:
+  0.0005 on eval-v1, 3 points on gap closed.
+- N1b exists on seed 42 only; both N2b seeds are measured against it.
