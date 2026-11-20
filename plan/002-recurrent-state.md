@@ -113,7 +113,8 @@ Order agreed 2026-11-20: a second N2b seed first (D6), then N3a, then N3b.
   heads of P = 16 channels (`model.rec_head`), a P × N state per head,
   one decay per head (32 decay rates per layer instead of 512), L2-normed
   write/read vectors k, q. Same N2b protocol (rec_drop 0.1).
-- **N3b, one nonlinear layer:** the middle block's recurrence replaced by
+- **N3b, one nonlinear layer — shelved 2026-11-20** (see §8: no gain,
+  62% throughput; code kept behind `model.rec_nonlin`): the middle block's recurrence replaced by
   a gated nonlinear one, h = a·h + b·tanh(W h + x), the other blocks stay
   linear (precedent: xLSTM's mostly-mLSTM stacks with a few sLSTM blocks).
   W dense first (pure PyTorch, sequential in that one layer); if it helps,
@@ -328,7 +329,7 @@ heads of 16 channels, a 16 × 16 state per head, one decay per head.
   shares one decay over 16 channels (32 decay rates per layer instead of
   512) and normalises k and q. Not separated by this run.
 
-### N3b — nonlinear recurrence in the middle block (2026-11-20)
+### N3b — nonlinear recurrence in the middle block (2026-11-20) — shelved
 N2b protocol (cosine, rec_drop 0.1, seed 42) with `model.rec_nonlin="mid"`:
 block 4 of 8 runs h = a·h + √(1−a²)·σ(i)·tanh(u + W h) with a dense,
 zero-initialised 512 × 512 W; the other seven blocks are N2b.
@@ -356,3 +357,7 @@ zero-initialised 512 × 512 W; the other seven blocks are N2b.
 - Not run: the dense-W-without-tanh control, a second seed, the
   block-diagonal / kernel optimisations. With no gain at equal steps there
   is nothing for them to attribute or speed up.
+- **Shelved.** Code stays (`rec_nonlin` defaults to "none", tested).
+  Caveat: the expected benefit of nonlinear recurrence is state tracking
+  (counting, nesting), which average bpb at 7M parameters may not show;
+  revisit only if a state-tracking probe is added.
