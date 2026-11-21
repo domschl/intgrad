@@ -484,6 +484,13 @@ runs only after C6a has validated the warm-start protocol.
   - sampling can later be constrained to valid JSON inside the tags
     without touching the model.
   Role and turn markers stay a post-training decision.
+- **003-D11 Optimizer: AdamW replaces Lion** (user, 2026-11-21; supersedes
+  001-D4 "Lion only"). Reasons: C2-A (untuned AdamW −0.019 against tuned
+  Lion on M1), the better-documented scaling behaviour of AdamW, and no
+  more need for Lion's large weights and strong decay. The quantization
+  path (W16Param master codes, plan 001 M4/M5) is Lion-only for now and
+  has to be redone for AdamW when quantization resumes. Lion stays in
+  the code. C2 M2–M4 run with AdamW (C2-A settings).
 
 ## 6. Open decisions
 
@@ -602,8 +609,8 @@ Untuned (common settings at ~40 M); Lion is the M5-tuned setting.
   with a sign-update noise floor.
 - Lion transfers slightly better to the sources M1 lacks (code, data);
   C2 M2/M3 will show whether that survives in-domain.
-- C2 M2–M4 continue with Lion (user decision), so the mixture ranking
-  stays internally consistent. Next, pending user decision: AdamW lr/wd
+- Decision 003-D11: AdamW from here on. The Lion M2 run was stopped at
+  step ~7000 (incomplete, not used); M2–M4 run with AdamW. Next: AdamW lr/wd
   sweep on the winning mixture (lr 1e-3 / 4e-3, then wd 0.03 / 0.3, β2
   0.99), then a 900 MB horizon check. Quantization cost under AdamW is
   unmeasured (plan 001 M4/M5 were Lion-only).

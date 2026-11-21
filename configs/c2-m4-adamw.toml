@@ -1,0 +1,47 @@
+# plan 003 C2 m4 with AdamW (C2-A settings): M1 without German
+# N2b protocol (plan 002: carried state, rec_drop 0.1, cosine) on split-v2,
+# scored on eval-v2 (primary, D4). 36 M, 300 MB = 9,155 steps x 32 kB, seed 42.
+name = "c2-m4-adamw"
+
+[model]
+kind = "transformer"
+preset = "L"
+qkv_conv = 3
+rec = "lru"
+
+[quant]
+enabled = false
+
+[train]
+steps = 9155
+batch = 32
+micro_batch = 8
+optimizer = "adamw"
+lr = 2e-3
+wd = 0.1
+grad_clip = 1.0
+warmup = 1000
+betas = [0.9, 0.95]
+compile = true
+log_every = 200
+telemetry_every = 2000
+eval_every = 2000
+samples = 32
+sample_len = 1024
+rec_drop = 0.1
+val_every = 200
+eval_samples = 4
+
+[data]
+index = "data/split-v2/idx.bin"
+eval = "data/eval-v2"
+batcher = "sequential"
+streams = 1024
+
+[data.weights]        # byte shares (normalised by the batcher)
+"books-md-en" = 17.65
+"edu-en" = 23.53
+"cosmo" = 17.65
+"books" = 17.65
+"wiki-en" = 11.76
+"math" = 11.76
