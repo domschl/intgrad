@@ -412,3 +412,29 @@ held from step 1000 to 7200, then decayed to 0 by 9000).
   decoupled weight decay (lr·wd) also stays at its peak.
 - Cosine stays the default. WSD is only worth revisiting for runs that
   must be extendable, with a much longer decay share (≥ 0.5).
+
+### N3c — capacity on 900 MB (2026-11-21)
+N2b protocol (cosine, rec_drop 0.1, seed 42) on 900 MB (27,465 steps),
+36 M (d 512 × 8) and 54 M (d 512 × 12).
+
+| | N2b 300 MB | N2b 900 MB | N2b-L12 900 MB |
+|---|---|---|---|
+| eval-v1 (zero state) | 1.490 | 1.407 | **1.389** |
+| books / wiki-en / wiki-de / text | 1.549 / 1.391 / 1.432 / 1.622 | 1.450 / 1.328 / 1.362 / 1.556 | 1.435 / 1.307 / 1.340 / 1.540 |
+| whole windows, zero state / carried | 1.448 / 1.410 | 1.379 / 1.341 | 1.358 / 1.323 |
+| first 64 B, cold / carried | 1.854 / 1.601 | 1.802 / 1.523 | 1.788 / 1.500 |
+| gap closed (own cold-warm gap) | 52% | 55% | 56% |
+| bytes per parameter | 8 | 25 | 17 |
+| train time, peak memory | 1.4 h, 5.4 GiB | 4.3 h, 5.4 GiB | 6.4 h, 8.0 GiB |
+
+- **Data is the main lever:** 3× the data gives −0.083 on eval-v1, on
+  every source. The 36 M model is far from saturated at 300 MB.
+- **Depth helps, less:** 12 blocks give a further −0.018, consistent on
+  every source and at every eval point from step 12k on (−0.011 to
+  −0.017), at 1.5× the time.
+- At equal time the data lever looks stronger: by a log-linear guess
+  (−0.083 per 3×), 1.5× more data at 36 M would be worth ≈ −0.03, more
+  than the −0.018 from depth. Not measured yet.
+- The recurrent state keeps working at scale: the carried state closes
+  55–56% of each model's own gap (the gap itself grows, 0.489 → 0.516,
+  because the warm context improves faster than the cold one).
