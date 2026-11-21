@@ -198,3 +198,75 @@ def test_wiki_leads_share_a_bucket():
     # titles win over (edited) leads
     edited = b"Anarchism (/x/) is a philosophy and movement that rejects authority."
     assert bucket_key(edited, "wiki-defs", "Anarchism") == bucket_key(art, "wiki-en", "anarchism")
+
+
+@pytest.fixture(scope="module")
+def two_sources(tmp_path_factory):
+    """Docs of source "text" are lowercase, docs of source "code" uppercase."""
+    root = tmp_path_factory.mktemp("two")
+    rng = np.random.default_rng(1)
+    cdir = root / "c"
+    cdir.mkdir()
+    buf, docs = bytearray(), []
+    for i in range(400):
+        kind, lo = ("code", 65) if i % 4 == 0 else ("textcorpus", 97)   # code: 25% of docs
+        doc = bytes(rng.integers(lo, lo + 26, size=int(rng.integers(200, 2000)), dtype=np.uint8))
+        if buf:
+            buf += SEP
+        docs.append({"off": len(buf), "len": len(doc), "src": f"d{i}", "kind": kind, "lang": "en"})
+        buf += doc
+    (cdir / "shard-0000.bin").write_bytes(bytes(buf))
+    (cdir / "manifest.jsonl").write_text(json.dumps({"shard": "shard-0000.bin", "bytes": len(buf),
+                                                     "docs": docs}) + "\n")
+    out = root / "split"
+    subprocess.run([sys.executable, "-m", "intgrad.corpus.make_split", "--corpus", str(cdir),
+                    "--out", str(out), "--val-permille", "0", "--test-permille", "0"],
+                   check=True, capture_output=True)
+    return data.Index(out / "idx.bin")
+
+
+def _upper_share(bt, steps):
+    up = n = 0
+    for _ in range(steps):
+        x = bt.next().x
+        letters = (x >= 65) & (x < 123)
+        up += int(((x >= 65) & (x < 91)).sum())
+        n += int(letters.sum())
+    return up / n
+
+
+@pytest.mark.parametrize("w_code", [0.5, 0.75])
+def test_weights_set_the_byte_share_per_source(two_sources, w_code):
+    bt = data.SequentialBatcher(two_sources, data.TRAIN, batch=4, seq=256, seed=3, streams=16,
+                                weights={"text": 1 - w_code, "code": w_code})
+    assert bt.stream_shares() == pytest.approx({"text": 1 - w_code, "code": w_code})
+    assert _upper_share(bt, 200) == pytest.approx(w_code, abs=0.01)
+    # unweighted: the pool composition (about 25% code by bytes)
+    plain = data.SequentialBatcher(two_sources, data.TRAIN, batch=4, seq=256, seed=3, streams=16)
+    assert _upper_share(plain, 200) == pytest.approx(0.25, abs=0.08)
+
+
+def test_weighted_rows_stay_within_their_source_and_resume_exactly(two_sources):
+    kw = dict(batch=4, seq=300, seed=5, streams=8, weights={"text": 0.5, "code": 0.5})
+    a = data.SequentialBatcher(two_sources, data.TRAIN, **kw)
+    for _ in range(30):
+        b = a.next()
+        for r, row in zip(b.rows, b.x):
+            g = a.gof[r][0]
+            letters = row[(row >= 65) & (row < 123)]
+            assert ((letters < 91) == (g == 1)).all()          # one source per stream
+    st = json.loads(json.dumps(a.state_dict()))
+    ref = [a.next().x.copy() for _ in range(25)]
+    c = data.SequentialBatcher(two_sources, data.TRAIN, **kw)
+    c.load_state_dict(st)
+    for r in ref:
+        assert np.array_equal(c.next().x, r)
+    d = data.SequentialBatcher(two_sources, data.TRAIN, **{**kw, "weights": {"text": 1, "code": 3}})
+    with pytest.raises(ValueError):
+        d.load_state_dict(st)
+
+
+def test_unknown_source_weight_is_rejected(two_sources):
+    with pytest.raises(ValueError):
+        data.SequentialBatcher(two_sources, data.TRAIN, batch=4, seq=64, seed=0, streams=8,
+                               weights={"nope": 1.0})

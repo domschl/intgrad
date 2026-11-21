@@ -63,7 +63,8 @@ DEFAULTS = {
               "device": "cuda" if torch.cuda.is_available() else "cpu"},
     "data": {"index": "data/split-v1/idx.bin", "eval": "data/eval-v1",
              "batcher": "random",   # "sequential": document-continuous streams (plan 002)
-             "streams": 0},         # sequential: pool of S streams (0 = batch), B drawn per step
+             "streams": 0,          # sequential: pool of S streams (0 = batch), B drawn per step
+             "weights": {}},        # sequential: {source: weight}, byte shares per source (plan 003)
 }
 
 
@@ -280,7 +281,10 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     if kind not in ("random", "sequential"):
         raise ValueError(f"data.batcher {kind!r}")
     Batcher = data.SequentialBatcher if kind == "sequential" else data.RandomBatcher
-    bkw = {"streams": cfg["data"]["streams"]} if kind == "sequential" else {}
+    bkw = {"streams": cfg["data"]["streams"], "weights": cfg["data"]["weights"] or None} \
+        if kind == "sequential" else {}
+    if kind != "sequential" and cfg["data"]["weights"]:
+        raise ValueError("data.weights needs data.batcher = \"sequential\"")
     batcher = Batcher(ix, data.TRAIN, batch=t["batch"], seq=ctx, seed=t["seed"], **bkw)
     ev = EvalSet(ev_path, "val")
     ev_quick = ev.subset(t["val_frac"]) if t["val_every"] else None

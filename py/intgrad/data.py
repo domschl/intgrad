@@ -11,7 +11,9 @@ SequentialBatcher  B independent streams; row b of batch t continues row b
                    of batch t-1 byte-for-byte. Each stream walks its own
                    share of a seeded per-epoch document permutation. A
                    `doc_start` mask marks inputs that begin a document, so a
-                   recurrent model can reset (or keep) state there.
+                   recurrent model can reset (or keep) state there. With
+                   per-source weights, streams are assigned to sources in
+                   proportion, so byte shares follow the weights (plan 003 C1).
 
 Both are deterministic given the seed, and resumable via state_dict().
 Batches are numpy uint8 arrays x, y of shape [B, T] with y = x shifted by
@@ -185,7 +187,7 @@ class SequentialBatcher:
     come from different documents. Batch.rows names each row's stream."""
 
     def __init__(self, index: Index, bucket: int, batch: int, seq: int, seed: int,
-                 streams: int = 0):
+                 streams: int = 0, weights: dict[str, float] | None = None):
         self.ix = index
         self.ids = index.bucket_ids(bucket)
         S = streams or batch
@@ -194,6 +196,13 @@ class SequentialBatcher:
         if len(self.ids) < S:
             raise ValueError("fewer documents than streams")
         self.B, self.S, self.T, self.seed = batch, S, seq, seed
+        self.weights = dict(weights) if weights else None
+        # stream groups: (doc ids, stream count); stream b -> (group, j-th stream of it)
+        if self.weights is None:
+            self.groups = [self.ids]
+            self.gof = [(0, b, S) for b in range(S)]
+        else:
+            self.groups, self.gof = self._assign(index, weights, S)
         self.step = 0
         self._perm_cache: dict[int, np.ndarray] = {}
         self._streams: dict[tuple[int, int], _Stream] = {}
@@ -204,6 +213,50 @@ class SequentialBatcher:
         self.carry: list[int | None] = [None] * S
         self.carry_start = [False] * S
 
+    def _assign(self, index: Index, weights: dict[str, float], S: int):
+        """Streams per source in proportion to the weights (largest remainder,
+        at least one stream per source with weight > 0), interleaved so
+        every stream round mixes all sources. Every stream advances one
+        window per round, so a source's byte share is its stream share."""
+        src = index.docs["source"][self.ids]
+        names = [n for n, w in weights.items() if w > 0]
+        unknown = [n for n in names if n not in index.sources]
+        if unknown:
+            raise ValueError(f"unknown sources {unknown}; index has {index.sources}")
+        tot = sum(weights[n] for n in names)
+        exact = [S * weights[n] / tot for n in names]
+        cnt = [max(1, int(e)) for e in exact]
+        for i in sorted(range(len(names)), key=lambda i: cnt[i] - exact[i]):
+            if sum(cnt) >= S:
+                break
+            cnt[i] += 1
+        while sum(cnt) > S:                              # floors of 1 overshot
+            i = max(range(len(cnt)), key=lambda i: cnt[i] - exact[i])
+            cnt[i] -= 1
+        groups = []
+        for n, c in zip(names, cnt):
+            g = self.ids[src == index.sources.index(n)]
+            if len(g) < c:
+                raise ValueError(f"source {n}: {len(g)} documents for {c} streams")
+            groups.append(g)
+        # interleave: stream b gets the group whose quota is furthest behind
+        gof, used = [], [0] * len(names)
+        for b in range(S):
+            g = min(range(len(names)), key=lambda i: (used[i] + 0.5) / cnt[i] if used[i] < cnt[i] else 9e9)
+            gof.append((g, used[g], cnt[g]))
+            used[g] += 1
+        return groups, gof
+
+    def stream_shares(self) -> dict[str, float]:
+        """Realised share of streams (= bytes) per source."""
+        if self.weights is None:
+            return {}
+        names = [n for n, w in self.weights.items() if w > 0]
+        out = dict.fromkeys(names, 0.0)
+        for g, _, _ in self.gof:
+            out[names[g]] += 1 / self.S
+        return out
+
     def _rows(self) -> np.ndarray:
         if self.S == self.B:
             return np.arange(self.B)
@@ -212,20 +265,23 @@ class SequentialBatcher:
         perm = np.random.Generator(np.random.PCG64([self.seed, 1 << 20, r])).permutation(self.S)
         return perm[j * self.B:(j + 1) * self.B]
 
-    def _perm(self, epoch: int) -> np.ndarray:
-        p = self._perm_cache.get(epoch)
+    def _perm(self, epoch: int, g: int = 0) -> np.ndarray:
+        p = self._perm_cache.get((epoch, g))
         if p is None:
-            rng = np.random.Generator(np.random.PCG64([self.seed, epoch]))
-            p = self.ids[rng.permutation(len(self.ids))]
-            self._perm_cache = {epoch: p, **{e: v for e, v in self._perm_cache.items()
-                                             if e >= epoch - 1}}
+            seed = [self.seed, epoch] if self.weights is None else [self.seed, epoch, 1 << 21, g]
+            ids = self.groups[g]
+            p = ids[np.random.Generator(np.random.PCG64(seed)).permutation(len(ids))]
+            # keep the current and previous epoch of every group
+            self._perm_cache = {(epoch, g): p, **{k: v for k, v in self._perm_cache.items()
+                                                 if k[1] != g or k[0] >= epoch - 1}}
         return p
 
     def _stream(self, b: int) -> _Stream:
         key = (self.epoch[b], b)
         s = self._streams.get(key)
         if s is None:
-            s = _Stream(self.ix, self._perm(self.epoch[b])[b::self.S])
+            g, j, n = self.gof[b]
+            s = _Stream(self.ix, self._perm(self.epoch[b], g)[j::n])
             self._streams = {k: v for k, v in self._streams.items() if k[1] != b}
             self._streams[key] = s
         return s
@@ -263,13 +319,15 @@ class SequentialBatcher:
 
     def state_dict(self) -> dict:
         return {"kind": "sequential", "seed": self.seed, "B": self.B, "S": self.S, "T": self.T,
-                "step": self.step,
+                "step": self.step, "weights": self.weights,
                 "epoch": list(self.epoch), "k": list(self.k), "off": list(self.off),
                 "carry": list(self.carry), "carry_start": list(self.carry_start)}
 
     def load_state_dict(self, st: dict) -> None:
         assert st["kind"] == "sequential" and st["seed"] == self.seed and st["B"] == self.B
         assert st.get("S", st["B"]) == self.S
+        if st.get("weights") != self.weights:
+            raise ValueError(f"checkpoint weights {st.get('weights')} != {self.weights}")
         self.step = st.get("step", 0)
         self.epoch, self.k, self.off = list(st["epoch"]), list(st["k"]), list(st["off"])
         self.carry, self.carry_start = list(st["carry"]), list(st["carry_start"])

@@ -276,6 +276,16 @@ locked in.
   This needs no training and shows where the current model is weakest.
 
 ### C1 — Mixture control
+- **Status (2026-11-21): implemented.** `data.weights = {source = w}`
+  with the sequential batcher.
+  - Streams are assigned to sources by largest remainder, with at least
+    one stream per weighted source, interleaved across the pool.
+  - Each stream reads whole documents from its source's own per-epoch
+    permutation.
+  - Byte shares therefore follow the weights to 1/S. Tested at 50/50 and
+    25/75 within ±1%.
+  - Without weights the batcher is unchanged, bit for bit.
+  - Resume is exact; a checkpoint with other weights is refused.
 - Weighted batcher (§3), tests for exact resume and for the realised
   weights.
 
