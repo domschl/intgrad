@@ -24,6 +24,12 @@ Sources:
   --max-docs N          stop after N accepted docs (sample runs)
   --jobs N              worker processes for book cleaning (default: all)
 
+Plan-003 sources (intgrad.corpus.ingest; per-doc lic/gated/private/grp):
+  --mdbooks DIR         Markdown books, classes from --mdbook-scores  kind: mdbook
+  --hf NAME ...         ig-fetch sources from --hf-root               kinds: edu cosmo web
+                                                                       math code tool
+  --exclude-gated       leave out files fetched under accepted terms
+
 Language filter: --langs en,de,fr,es,it,pt,nl (default); "unk" keeps
 unknown-language docs too (function-word scoring on body windows).
 
@@ -247,7 +253,8 @@ def iter_gutenberg(root: Path, jobs: int, stats: dict):
 
 
 def iter_docs(args, stats: dict):
-    """Yields (doc, src, kind, lang or None)."""
+    """Yields (doc, src, kind, lang or None) or, for plan-003 sources,
+    (doc, src, kind, lang, meta) with meta merged into the manifest record."""
     for spec in args.wiki_xml:
         lang, _, path = spec.partition("=")
         for doc, src, kind in iter_wiki_xml(lang, path):
@@ -266,6 +273,14 @@ def iter_docs(args, stats: dict):
         for fp in sorted(d.iterdir()):
             if fp.is_file() and fp.suffix == ".txt":
                 yield sanitize(pg.to_utf8(fp.read_bytes())), str(fp), "textcorpus", None
+    if args.mdbooks:
+        from intgrad.corpus import ingest
+        yield from ingest.iter_mdbooks(Path(args.mdbooks).expanduser(), Path(args.mdbook_scores),
+                                       set(args.mdbook_classes.split(",")),
+                                       set(args.langs.split(",")), args.jobs)
+    if args.hf:
+        from intgrad.corpus import ingest
+        yield from ingest.iter_hf(Path(args.hf_root), set(args.hf), args.exclude_gated, stats)
 
 
 def verify(out: Path) -> dict:
@@ -329,8 +344,10 @@ def build(args):
         buf = bytearray()
         docs_in_shard = []
 
-    allowed = set(args.langs.split(","))
-    for doc, src, kind, lang in iter_docs(args, stats):
+    allowed = set(args.langs.split(",")) | {"zxx"}     # zxx: no natural language (code)
+    for item in iter_docs(args, stats):
+        doc, src, kind, lang = item[:4]
+        meta = item[4] if len(item) > 4 else {}
         stats["docs_in"] += 1
         doc = doc.strip()  # invariant: docs never start/end with whitespace,
         if len(doc) < args.min_doc_bytes:  # so SEP boundaries are unambiguous
@@ -353,7 +370,7 @@ def build(args):
         off = len(buf)  # AFTER the separator: off points at the doc itself
         buf += doc
         docs_in_shard.append({"off": off, "len": len(doc), "src": src,
-                              "kind": kind, "lang": lang})
+                              "kind": kind, "lang": lang, **meta})
         stats["docs_out"] += 1
         stats["bytes_out"] += len(doc)
         stats["by_kind"][kind] = stats["by_kind"].get(kind, 0) + 1
@@ -381,6 +398,16 @@ def main():
     ap.add_argument("--wiki-xml", action="append", default=[],
                     metavar="LANG=PATH",
                     help="MediaWiki pages-articles dump (repeatable)")
+    ap.add_argument("--mdbooks", help="Markdown book tree (plan 003 §2.1), kind mdbook")
+    ap.add_argument("--mdbook-scores", default=str(Path(__file__).resolve().parents[3]
+                                                   / "data" / "mdbooks" / "scores.jsonl"))
+    ap.add_argument("--mdbook-classes", default="keep",
+                    help="comma list of ig-mdbook-score classes to include")
+    ap.add_argument("--hf", nargs="*", default=[], metavar="NAME",
+                    help="ig-fetch source names to include (plan 003 §2.3)")
+    ap.add_argument("--hf-root", default=str(Path(__file__).resolve().parents[3] / "data" / "raw" / "hf"))
+    ap.add_argument("--exclude-gated", action="store_true",
+                    help="skip files downloaded under accepted terms (open rebuild, D10)")
     ap.add_argument("--langs", default="en,de,fr,es,it,pt,nl")
     ap.add_argument("--max-docs", type=int, default=0)
     ap.add_argument("--jobs", type=int, default=0)

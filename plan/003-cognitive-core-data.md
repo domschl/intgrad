@@ -210,6 +210,28 @@ locked in.
       pyarrow as an optional extra; tool-use records converted to D9).
   - Every kind keeps the existing guarantees: no C0 bytes except `\t` and
     `\n`, exact dedup, provenance per document.
+  - **Status (2026-11-21): implemented** in `intgrad.corpus.ingest`, used
+    by `ig-build-shards --mdbooks … --hf NAME … [--exclude-gated]`; output
+    `data/corpus-v3`. Per document: `kind`, `lang`, `lic`, `gated`,
+    `private`, and `grp` (the split group key). Code also gets `repo` and
+    `path`.
+    - Kinds: mdbook, edu, cosmo, web, math, code, data (JSON and YAML
+      files, weighted apart from code), tool.
+    - Tool rendering for pretraining: role blocks `<system>` `<user>`
+      `<assistant>` `<tool_response>`, schemas in `<tools>`, calls as
+      `<tool_call>` + JSON (D9). Glaive's string-encoded arguments are
+      parsed into JSON; 130 of 112,960 Glaive conversations do not parse
+      and are dropped. xLAM and Hermes render completely.
+    - Code filters: size, longest line (minified), alphanumeric share,
+      generated-file markers, lock files, an 8 kB cap for JSON/YAML. They
+      keep 95–100% of Python, shell and YAML, 61–66% of JSON and Jupyter.
+      github-code-clean (60% kept, permissive only, e-mails and IPv4
+      redacted) is left out of the default build; StarCoderData covers
+      code.
+    - Book cleaning: on a 60-book sample, hard-wrapped blocks drop from
+      18% to 2% of blocks; the median size change is −0.2%.
+    - Not done yet: near-duplicate check of the books against Project
+      Gutenberg, front-matter stripping.
 - **C0b, split-v2:** group keys for the split.
   - book: normalised title;
   - code: repository (public datasets carry the repository name);
