@@ -63,3 +63,14 @@ def test_xlam_and_hermes_render_the_same_format():
                               {"from": "tool", "value": "<tool_response>\n{}\n</tool_response>"}])
     assert _calls(h) == [{"name": "g", "arguments": {}}]
     assert h.count("<tool_response>") == 1
+
+
+def test_split_v2_groups_and_sources():
+    from intgrad.corpus import make_split as ms
+    # documents of one repository / book share a bucket whatever their bytes
+    keys = {ms.bucket_key(bytes([i]) * 100, "code", None, "code:org/repo") for i in range(50)}
+    assert len(keys) == 1
+    assert ms.doc_source({"kind": "mdbook", "lang": "de"}) == ms.SOURCES.index("books-md-de")
+    assert ms.doc_source({"kind": "data"}) == ms.SOURCES.index("data")
+    # the plan-001 source ids are unchanged
+    assert ms.SOURCES[:6] == ["other", "books", "wiki-defs", "wiki-en", "wiki-de", "text"]

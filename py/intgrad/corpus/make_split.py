@@ -7,6 +7,8 @@ Bucket rule (deterministic, content-based, no seed to lose):
     and the article it was taken from must share a bucket (B10: 30% of val
     articles had their lead in a train definition under per-doc hashing;
     keying on the lead text instead still leaked ~14% because of edits).
+    Plan-003 documents carry a group key ("grp": book, repository or
+    conversation); all documents of a group share one bucket.
     Titles of articles come from the manifest src; titles of definitions
     from the raw dump (--wiki-defs-raw, line number in src). Without a
     title the normalized lead (LEAD_LETTERS letters) is the fallback key.
@@ -45,7 +47,12 @@ from pathlib import Path
 MAGIC = b"IGIX"
 VERSION = 2
 DOC = struct.Struct("<IIIBB")
-SOURCES = ["other", "books", "wiki-defs", "wiki-en", "wiki-de", "text"]
+SOURCES = ["other", "books", "wiki-defs", "wiki-en", "wiki-de", "text",
+           # plan 003 (corpus-v3); appended, so the ids above stay valid
+           "books-md-en", "books-md-de", "edu-en", "cosmo", "web-de", "math",
+           "code", "data", "tool"]
+KIND_SOURCE = {"edu": "edu-en", "cosmo": "cosmo", "web": "web-de", "math": "math",
+               "code": "code", "data": "data", "tool": "tool"}
 
 
 LEAD_LETTERS = 48
@@ -60,7 +67,9 @@ def norm_title(t: str) -> bytes:
     return _NONALNUM.sub("", t.lower()).encode()
 
 
-def bucket_key(b: bytes, source: str, title: str | None = None) -> bytes:
+def bucket_key(b: bytes, source: str, title: str | None = None, grp: str | None = None) -> bytes:
+    if grp:                                # plan 003: book, repository, conversation
+        return b"grp:" + grp.encode()
     if source in GROUP_BY_LEAD:
         if title and norm_title(title):
             return b"title:" + norm_title(title)
@@ -123,6 +132,10 @@ def doc_source(d: dict) -> int:
         return SOURCES.index(name) if name in SOURCES else 0
     if kind == "textcorpus":
         return SOURCES.index("text")
+    if kind == "mdbook":
+        return SOURCES.index("books-md-de" if d.get("lang") == "de" else "books-md-en")
+    if kind in KIND_SOURCE:
+        return SOURCES.index(KIND_SOURCE[kind])
     return 0
 
 
@@ -151,7 +164,7 @@ def scan(corpora: list[str], out: Path, val_per: int, test_per: int,
                 for d in rec["docs"]:
                     b = data[d["off"]:d["off"] + d["len"]]
                     sid = doc_source(d)
-                    key = bucket_key(b, SOURCES[sid], doc_title(d, def_titles))
+                    key = bucket_key(b, SOURCES[sid], doc_title(d, def_titles), d.get("grp"))
                     bk = doc_bucket(key, val_per, test_per)
                     docs += DOC.pack(fid, d["off"], d["len"], bk, sid)
                     n += 1
@@ -207,7 +220,7 @@ def main():
         "method": f"blake2b-64(key) % 1000 < {args.val_permille} -> val, "
                   f"< {args.val_permille + args.test_permille} -> test; key = doc, "
                   f"or the normalized title (fallback: {LEAD_LETTERS}-letter lead) "
-                  f"for {sorted(GROUP_BY_LEAD)}",
+                  f"for {sorted(GROUP_BY_LEAD)}, or the manifest group key (grp)",
         "wiki_defs_titles": bool(def_titles),
         "created": int(time.time()),
         "corpora": [os.path.relpath(Path(c).resolve(), out.resolve()) for c in args.corpus],
