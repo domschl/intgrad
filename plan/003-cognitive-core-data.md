@@ -122,6 +122,34 @@ under the privacy rule.
 - Value: the closest thing to "textbook quality" available. Explanatory,
   modern, mostly English, with German narrative prose.
 
+**First score (`ig-mdbook-score`, 2026-11-21).** Classes per D6. The
+per-book list stays in `data/mdbooks/scores.jsonl`.
+- About 40% of the books are hard-wrapped (paragraphs split into short
+  lines). The score works on blank-line separated blocks, and the cleaner
+  unwraps them.
+- Code fences and display maths count as content, not as damage.
+
+| class | books | bytes |
+|---|---|---|
+| keep | 2,840 | 2.32 GB |
+| reference-like | 403 | 0.28 GB |
+| poor conversion | 245 | 0.15 GB |
+
+Kept bytes by topic group and language (MB):
+
+| group | en | de |
+|---|---|---|
+| stem | 370 | 29 |
+| humanities | 451 | 114 |
+| narrative | 293 | 134 |
+| religion | 324 | 10 |
+| practical | 3 | 2 |
+| general | 534 | 26 |
+
+The thresholds are first guesses. They get checked by user spot checks
+on the per-book list. Group weights are set in C2: religion and the
+general group are candidates for down-weighting, as knowledge-dense.
+
 ### 2.2 Local source repositories: not used (003-D7)
 
 `~/Source` (263 git repositories) was surveyed, then excluded. Even

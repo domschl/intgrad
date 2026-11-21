@@ -20,6 +20,7 @@ ig-train = "intgrad.train:main"
 ig-position = "intgrad.position:main"
 ig-dash = "intgrad.dash:main"
 ig-fetch = "intgrad.corpus.fetch:main"
+ig-mdbook-score = "intgrad.corpus.mdbook:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
