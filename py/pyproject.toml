@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-corpus = ["lxml>=5.0", "zstandard>=0.23"]
+corpus = ["lxml>=5.0", "zstandard>=0.23", "pyarrow>=17"]
 
 [project.scripts]
 ig-build-shards = "intgrad.corpus.build_shards:main"
@@ -19,6 +19,7 @@ ig-eval-freeze = "intgrad.eval_set:main"
 ig-train = "intgrad.train:main"
 ig-position = "intgrad.position:main"
 ig-dash = "intgrad.dash:main"
+ig-fetch = "intgrad.corpus.fetch:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

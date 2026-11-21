@@ -144,6 +144,23 @@ exact dataset, version and license go into the manifest.
 | maths | FineMath / OpenWebMath sample | reasoning-dense text |
 | simple narrative | TinyStories | coherence probe and ablation only |
 
+**First download (C0, `ig-fetch`, 2026-11-21): 19.9 GB of parquet/JSON,**
+pinned by revision with license and sha256 in `data/raw/hf/SOURCES.jsonl`,
+archived to `~/Storage/Library/Corpora/HuggingFace`. Gated sets (xLAM,
+the Stack, StarCoder data) need a user token and are not fetched.
+
+| name | dataset (files) | license | raw |
+|---|---|---|---|
+| edu-en | FineWeb-Edu sample-10BT (2 of 14) | ODC-By | 4.3 GB |
+| cosmo | Cosmopedia khanacademy, openstax, stanford, wikihow | Apache-2.0 | 4.2 GB |
+| cosmo-math | Cosmopedia auto_math_text (2 of 18) | Apache-2.0 | ≈ 0.5 GB |
+| cosmo-stories | Cosmopedia stories (2 of 43) | Apache-2.0 | ≈ 0.55 GB |
+| web-de | FineWeb-2 deu_Latn (1 of 181) | ODC-By | 4.8 GB |
+| math | FineMath-4plus (8 of 64) | ODC-By | 2.3 GB |
+| code | github-code-clean (8 of 880; filtered to permissive licenses at build) | per file | 2.9 GB |
+| tool-glaive | Glaive function-calling v2 | Apache-2.0 | 0.27 GB |
+| tool-hermes | Hermes function-calling v1 | Apache-2.0 | 0.07 GB |
+
 Tool-use data is conversational. Pretraining sees it as plain documents in
 its own format (JSON or tagged), with no role semantics yet. Role and
 turn conventions are a post-training decision (D5). The C0 control range
