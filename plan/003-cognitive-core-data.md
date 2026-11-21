@@ -417,4 +417,67 @@ back.
 
 ## 8. Experiment log
 
-*(empty)*
+### C0 — corpus-v3, split-v2, eval-v2, baselines (2026-11-21)
+
+**corpus-v3** (`ig-build-shards`, all §2.3 sources except the
+github-code-clean fallback, "keep" books, en and de): 12.56 M documents,
+46.4 GB. 19k exact duplicates dropped; shard verification found no
+problems.
+
+| source | train | val docs | test docs |
+|---|---|---|---|
+| code | 13.21 GB | 3,603 | 3,673 |
+| web-de | 10.30 GB | 3,306 | 3,385 |
+| cosmo | 7.65 GB | 1,763 | 1,730 |
+| edu-en | 6.89 GB | 1,461 | 1,376 |
+| math | 4.24 GB | 889 | 832 |
+| books-md-en | 1.85 GB | 47 books | 44 books |
+| data (JSON, YAML) | 1.46 GB | 1,187 | 1,536 |
+| tool | 0.36 GB | 174 | 180 |
+| books-md-de | 0.29 GB | 23 books | 16 books |
+
+**split-v2** = corpus-v2 + corpus-v1-wiki + corpus-v3: 23.4 M documents,
+86.3 GB train.
+- Grouped by book, repository and conversation.
+- Books are held out at 2% (en) and 6% (de) instead of 1‰, because
+  whole books are held out; all other sources stay at 1‰.
+- split-v1 rebuilds byte-identically (`--check`).
+- All 10.8 M plan-001 documents keep their bucket, source and offset in
+  split-v2, so eval-v1 stays clean for runs on split-v2.
+
+**eval-v2**: stratified, 128 chunks × 2048 B per source, 13 sources
+("other" and "text" left out), val and test. Val blake2b
+`3126e137fe4d4e4a06899f30c82f45a7`.
+
+Existing checkpoints (trained on the old pool), scored by `ig-score`
+(eval-v2 val, bpb; KN-5 is trained on a split-v2 train sample):
+
+| source | KN-5 | N2b 300 MB | N2b 900 MB | N2b-L12 900 MB |
+|---|---|---|---|---|
+| **all (equal weight)** | 2.569 | 1.702 | 1.618 | **1.598** |
+| books (Gutenberg) | 2.523 | 1.558 | 1.454 | 1.437 |
+| wiki-defs | 2.450 | 1.341 | 1.280 | 1.253 |
+| wiki-en | 2.449 | 1.421 | 1.360 | 1.337 |
+| wiki-de | 2.636 | 1.454 | 1.381 | 1.362 |
+| books-md-en | 2.513 | 1.788 | 1.672 | 1.646 |
+| books-md-de | 3.549 | 2.253 | 2.157 | 2.132 |
+| edu-en | 2.291 | 1.476 | 1.411 | 1.396 |
+| cosmo | 2.145 | 1.497 | 1.434 | 1.415 |
+| web-de | 2.574 | 1.734 | 1.669 | 1.655 |
+| math | 2.677 | 1.792 | 1.740 | 1.692 |
+| code | 2.755 | 2.237 | 2.070 | 2.084 |
+| data | 2.780 | 1.949 | 1.882 | 1.848 |
+| tool | 2.051 | 1.625 | 1.527 | 1.518 |
+
+- **Weakest where the old pool has nothing:** code (2.07–2.24), the German
+  Markdown books (2.13–2.25), data (1.85–1.95), maths (1.69–1.79). The
+  plain-prose sources it never saw (edu-en, cosmo) are already close to
+  Wikipedia, so modern English prose transfers.
+- **German books are the hardest source** for every model and for KN-5
+  (3.55). The domain (literature, psychology, practical books) is far
+  from wiki-de, and there are only 0.29 GB of them.
+- The 12-block model is not better on code (2.084 vs 2.070): depth does
+  not help on a domain the data lacks.
+- The Markdown books score 0.2 above Gutenberg (1.65 vs 1.44). That fits
+  a harder domain (tables, maths, technical text) more than bad cleaning;
+  user spot checks of the classes are still open.
