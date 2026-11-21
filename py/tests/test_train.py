@@ -197,3 +197,48 @@ def test_quick_val_and_periodic_samples_are_logged(tmp_path):
     assert [r["step"] for r in recs if "val_quick" in r] == [4]
     blob = (tmp_path / "v-s42/samples/0000004.bin").read_bytes()
     assert blob.count(b"\x03\n") == 2 and len(blob) == 2 * (8 + 2)
+
+
+def _adamw_cfg(**train_kw):
+    cfg = copy.deepcopy(train.DEFAULTS)
+    cfg["model"] = {"kind": "transformer", "d": 32, "L": 2, "H": 2, "T": 32, "rec": "lru",
+                    "rec_chunk": 8, "rec_head": 8}
+    cfg["quant"]["enabled"] = False
+    cfg["data"].update(batcher="sequential", streams=16)
+    cfg["train"].update(steps=40, batch=8, warmup=5, device="cpu", log_every=10, final_eval=False,
+                        optimizer="adamw", lr=3e-3, wd=0.1, betas=[0.9, 0.95], grad_clip=1.0,
+                        **train_kw)
+    return cfg
+
+
+@need
+def test_adamw_resume_is_bit_exact(tmp_path):
+    a = _adamw_cfg()
+    a["name"] = "a"
+    train.run(a, out_root=tmp_path)
+    b = _adamw_cfg(stop=20)
+    b["name"] = "b"
+    train.run(b, out_root=tmp_path)
+    b["train"]["stop"] = 0
+    train.run(b, resume=tmp_path / "b-s42")
+    ca = torch.load(tmp_path / "a-s42/ckpt.pt", weights_only=False)
+    cb = torch.load(tmp_path / "b-s42/ckpt.pt", weights_only=False)
+    assert ca["step"] == cb["step"] == 40
+    for k in ca["model"]:
+        assert torch.equal(ca["model"][k], cb["model"][k]), k
+    st = ca["opt"]["state"]
+    assert st and all("exp_avg_sq" in s for s in st.values())
+
+
+def test_adamw_keeps_the_decay_groups_and_rejects_quant_and_anchors():
+    from intgrad.models.transformer import build
+    m = build(d=32, L=2, H=2, T=16)
+    t = {**train.DEFAULTS["train"], "optimizer": "adamw", "lr": 1e-3}
+    groups = train.param_groups(m, 0.1)
+    opt = train.make_adamw(groups, t, {"enabled": False}, "cpu")
+    assert [g["weight_decay"] for g in opt.param_groups] == [0.1, 0.0]
+    assert groups[0]["wd"] == 0.1                      # caller's groups untouched
+    with pytest.raises(ValueError, match="quant"):
+        train.make_adamw(groups, t, {"enabled": True}, "cpu")
+    with pytest.raises(ValueError, match="Lion-only"):
+        train.make_adamw(train.param_groups(m, 0.1, norm_wd=1.0), t, {"enabled": False}, "cpu")

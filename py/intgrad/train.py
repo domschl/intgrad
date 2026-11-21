@@ -55,6 +55,8 @@ DEFAULTS = {
               "stop": 0,  # >0: pause at this step (horizon stays train.steps)
               "telemetry_every": 0, "samples": 0, "sample_len": 1024,
               "compile": False, "final_eval": True, "betas": [0.9, 0.99],
+              "optimizer": "lion",  # "adamw": torch AdamW, fp only (plan 003 C2-A); wd is decoupled (lr*wd)
+              "eps": 1e-8, "grad_clip": 0.0,  # adamw eps; >0: clip the global grad norm (any optimizer)
               "micro_batch": 0,  # >0: gradient accumulation over micro-batches
               "norm_wd": 0.0, "conv_decay": "zero",
               "lr_emb": 1.0, "lr_vec": 1.0,  # lr multipliers: embedding/head, gains
@@ -170,6 +172,23 @@ def param_groups(model, wd: float, norm_wd: float = 0.0, conv_decay: str = "zero
     return groups
 
 
+def make_adamw(groups: list[dict], t: dict, q: dict, dev) -> torch.optim.AdamW:
+    """torch AdamW over the same weight-decay groups as Lion (plan 003 C2-A).
+    Full precision only: quantized storage (W16Param master codes) is Lion's.
+    Decay toward an anchor (norm_wd, conv_decay "init") is Lion-only too."""
+    if q.get("enabled"):
+        raise ValueError("train.optimizer \"adamw\" needs quant.enabled = false")
+    out = []
+    for g in groups:
+        if g.get("anchor"):
+            raise ValueError("train.optimizer \"adamw\": anchored decay (norm_wd, conv_decay init) is Lion-only")
+        g = dict(g)
+        g["weight_decay"] = g.pop("wd")
+        out.append(g)
+    return torch.optim.AdamW(out, lr=t["lr"], betas=tuple(t["betas"]), eps=t["eps"],
+                             fused=str(dev).startswith("cuda"))
+
+
 def cfg_is_mlp(model) -> bool:
     from intgrad.models.mlp import ByteMLP
     return isinstance(model, ByteMLP)
@@ -267,9 +286,13 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
     qc = QuantConfig(**q)
     model = build_model(cfg, qc, gen).to(dev)
     sr_gen = torch.Generator(device=dev).manual_seed(t["seed"] + 1)
-    opt = Lion(param_groups(model, t["wd"], t["norm_wd"], t["conv_decay"], t["lr_emb"], t["lr_vec"]),
-               lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen,
-               betas=tuple(t["betas"]))
+    groups = param_groups(model, t["wd"], t["norm_wd"], t["conv_decay"], t["lr_emb"], t["lr_vec"])
+    if t["optimizer"] == "lion":
+        opt = Lion(groups, lr=t["lr"], wd=t["wd"], qc=qc, generator=sr_gen, betas=tuple(t["betas"]))
+    elif t["optimizer"] == "adamw":
+        opt = make_adamw(groups, t, q, dev)
+    else:
+        raise ValueError(f"train.optimizer {t['optimizer']!r}")
     ix = data.Index(idx_path)
     ctx = context_len(cfg, model)
     is_mlp = cfg_is_mlp(model)
@@ -345,6 +368,8 @@ def run(cfg: dict, resume: Path | None = None, out_root: Path = ROOT / "runs",
                               for j in range(len(new_state[0]))]
                 for j, ss in enumerate(zip(*new_state)):
                     rstate[j][rows] = torch.cat(ss)
+        if t["grad_clip"] > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), t["grad_clip"])
         opt.step()
         if step % t["log_every"] == 0 or step == end - 1:
             el = time.time() - t0
