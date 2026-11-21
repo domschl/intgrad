@@ -44,9 +44,12 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 MAGIC = b"IGIX"
 VERSION = 2
 DOC = struct.Struct("<IIIBB")
+_DOC_NP = np.dtype([("file", "<u4"), ("off", "<u4"), ("len", "<u4"), ("bucket", "u1"), ("source", "u1")])
 SOURCES = ["other", "books", "wiki-defs", "wiki-en", "wiki-de", "text",
            # plan 003 (corpus-v3); appended, so the ids above stay valid
            "books-md-en", "books-md-de", "edu-en", "cosmo", "web-de", "math",
@@ -140,7 +143,7 @@ def doc_source(d: dict) -> int:
 
 
 def scan(corpora: list[str], out: Path, val_per: int, test_per: int,
-         def_titles: list[str] | None = None):
+         def_titles: list[str] | None = None, rates: dict[str, tuple[int, int]] | None = None):
     files: list[str] = []
     fid_of: dict[str, int] = {}
     docs = bytearray()
@@ -165,7 +168,8 @@ def scan(corpora: list[str], out: Path, val_per: int, test_per: int,
                     b = data[d["off"]:d["off"] + d["len"]]
                     sid = doc_source(d)
                     key = bucket_key(b, SOURCES[sid], doc_title(d, def_titles), d.get("grp"))
-                    bk = doc_bucket(key, val_per, test_per)
+                    vp, tp = (rates or {}).get(SOURCES[sid], (val_per, test_per))
+                    bk = doc_bucket(key, vp, tp)
                     docs += DOC.pack(fid, d["off"], d["len"], bk, sid)
                     n += 1
                     counts[bk][0] += 1
@@ -177,14 +181,20 @@ def scan(corpora: list[str], out: Path, val_per: int, test_per: int,
 
 
 def write_index(path: Path, files: list[str], docs: bytes) -> None:
+    """The source table lists SOURCES up to the highest id used (at least the
+    six plan-001 names), so indexes without plan-003 sources stay
+    byte-identical to the ones built before the table grew."""
+    src = np.frombuffer(docs, dtype=_DOC_NP)["source"]
+    used = int(src.max()) if len(src) else 0
+    names = SOURCES[:max(6, int(used) + 1)]
     with open(path, "wb") as f:
         f.write(MAGIC)
         f.write(struct.pack("<II", VERSION, len(files)))
         for p in files:
             pb = p.encode()
             f.write(struct.pack("<I", len(pb)) + pb)
-        f.write(struct.pack("<I", len(SOURCES)))
-        for s in SOURCES:
+        f.write(struct.pack("<I", len(names)))
+        for s in names:
             f.write(struct.pack("<B", len(s)) + s.encode())
         f.write(docs)
 
@@ -195,6 +205,9 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--val-permille", type=int, default=1)
     ap.add_argument("--test-permille", type=int, default=1)
+    ap.add_argument("--permille", action="append", default=[], metavar="SOURCE=VAL:TEST",
+                    help="per-source held-out rates, e.g. books-md-de=60:60 for sources "
+                         "with few groups (plan 003: whole books are held out)")
     ap.add_argument("--wiki-defs-raw",
                     help="raw 'Title ||| definition' dump: titles for split grouping")
     ap.add_argument("--check", action="store_true",
@@ -205,8 +218,15 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     def_titles = load_def_titles(args.wiki_defs_raw)
+    rates = {}
+    for spec in args.permille:
+        name, _, vt = spec.partition("=")
+        if name not in SOURCES:
+            sys.exit(f"--permille: unknown source {name!r}")
+        v, _, t = vt.partition(":")
+        rates[name] = (int(v), int(t or v))
     files, docs, n, counts, per_src = scan(args.corpus, out, args.val_permille,
-                                           args.test_permille, def_titles)
+                                           args.test_permille, def_titles, rates)
     tmp = out / ("idx.check" if args.check else "idx.bin.tmp")
     write_index(tmp, files, docs)
     if args.check:
@@ -222,6 +242,7 @@ def main():
                   f"or the normalized title (fallback: {LEAD_LETTERS}-letter lead) "
                   f"for {sorted(GROUP_BY_LEAD)}, or the manifest group key (grp)",
         "wiki_defs_titles": bool(def_titles),
+        **({"permille_per_source": {k: list(v) for k, v in rates.items()}} if rates else {}),
         "created": int(time.time()),
         "corpora": [os.path.relpath(Path(c).resolve(), out.resolve()) for c in args.corpus],
         "sources": SOURCES,

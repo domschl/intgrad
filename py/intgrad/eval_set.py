@@ -14,6 +14,8 @@ Every model scores the same targets: positions 1..L-1 of each chunk,
 predicted from bytes inside the chunk only.
 
   uv run ig-eval-freeze freeze --index ../data/split-v1/idx.bin --out ../data/eval-v1
+  uv run ig-eval-freeze freeze --index ../data/split-v2/idx.bin --out ../data/eval-v2 \\
+      --per-source 128                       # stratified (plan 003 eval-v2)
   uv run ig-eval-freeze baselines --index ../data/split-v1/idx.bin --eval ../data/eval-v1
 """
 from __future__ import annotations
@@ -45,6 +47,29 @@ def freeze(index: data.Index, bucket: int, n: int, length: int, seed: int):
         bt.stream.read(k, off, chunks[i], None)
         src[i] = index.docs["source"][ids[k]]
     return chunks, src
+
+
+def freeze_stratified(index: data.Index, bucket: int, per_source: int, length: int, seed: int,
+                      skip: set[str] = frozenset()):
+    """per_source chunks from every source of the bucket (eval-v2, plan 003):
+    byte-uniform positions within the source's own virtual stream, so a chunk
+    may cross into the next document of the same source. Sources in order
+    of their id; sources not in the bucket are left out."""
+    ids = index.bucket_ids(bucket)
+    src_of = index.docs["source"][ids]
+    chunks, src = [], []
+    for sid in np.unique(src_of):
+        if index.sources[sid] in skip:
+            continue
+        st = data._Stream(index, ids[src_of == sid])
+        rng = np.random.Generator(np.random.PCG64([seed, int(sid)]))
+        c = np.empty((per_source, length), dtype=np.uint8)
+        for i, u in enumerate(rng.integers(0, st.total, size=per_source)):
+            k = int(np.searchsorted(st.cum, int(u), side="right"))
+            st.read(k, int(u) - int(st.cum[k] - (st.lens[k] + 1)), c[i], None)
+        chunks.append(c)
+        src += [sid] * per_source
+    return np.concatenate(chunks), np.array(src, dtype=np.uint8)
 
 
 class EvalSet:
@@ -179,6 +204,9 @@ def main():
     f.add_argument("--chunks", type=int, default=512)
     f.add_argument("--length", type=int, default=2048)
     f.add_argument("--seed", type=int, default=20261117)
+    f.add_argument("--per-source", type=int, default=0,
+                   help="stratified: this many chunks per source instead of --chunks overall")
+    f.add_argument("--skip", default="other", help="comma list of sources left out (stratified)")
     b = sub.add_parser("baselines")
     b.add_argument("--index", required=True)
     b.add_argument("--eval", required=True)
@@ -194,8 +222,14 @@ def main():
         idx_hash = hashlib.blake2b(Path(a.index).read_bytes(), digest_size=16).hexdigest()
         meta = {"name": out.name, "length": a.length, "chunks": a.chunks, "seed": a.seed,
                 "index_blake2b": idx_hash, "sources": ix.sources, "created": int(time.time())}
+        if a.per_source:
+            meta.update(chunks=None, per_source=a.per_source, skip=sorted(set(a.skip.split(","))))
         for name, bucket, seed in (("val", data.VAL, a.seed), ("test", data.TEST, a.seed + 1)):
-            chunks, src = freeze(ix, bucket, a.chunks, a.length, seed)
+            if a.per_source:
+                chunks, src = freeze_stratified(ix, bucket, a.per_source, a.length, seed,
+                                                set(a.skip.split(",")))
+            else:
+                chunks, src = freeze(ix, bucket, a.chunks, a.length, seed)
             raw = chunks.tobytes()
             (out / f"{name}.bin").write_bytes(raw)
             (out / f"{name}.src").write_bytes(src.tobytes())
