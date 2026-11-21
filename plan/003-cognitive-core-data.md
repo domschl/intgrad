@@ -573,3 +573,37 @@ Existing checkpoints (trained on the old pool), scored by `ig-score`
 - The Markdown books score 0.2 above Gutenberg (1.65 vs 1.44). That fits
   a harder domain (tables, maths, technical text) more than bad cleaning;
   user spot checks of the classes are still open.
+
+### C2-A — M1 with AdamW instead of Lion (2026-11-21)
+User question: is the stall of long Lion runs (plan 002 N3c: the 900 MB
+run barely moves while lr > 5e-4; WSD's stable phase stalls) a Lion
+property, and would AdamW put us on better-documented scaling? M1
+protocol, identical data order and seed; only the optimizer differs.
+AdamW (`train.optimizer="adamw"`, fp only): lr 2e-3, wd 0.1 (decoupled),
+β (0.9, 0.95), grad-norm clip 1.0, same warmup 1000 + cosine to 0.
+Untuned (common settings at ~40 M); Lion is the M5-tuned setting.
+
+| eval-v2 val (bpb) | Lion M1 | AdamW M1 | Δ |
+|---|---|---|---|
+| overall (equal weight) | 1.518 | **1.499** | −0.019 |
+| at step 2000 / 4000 / 6000 / 8000 | 1.925 / 1.783 / 1.693 / 1.550 | 1.839 / 1.662 / 1.570 / 1.508 | −0.086 / −0.120 / −0.123 / −0.042 |
+| books / wiki-en / wiki-de | 1.628 / 1.500 / 1.570 | 1.594 / 1.477 / 1.535 | −0.033 / −0.023 / −0.035 |
+| books-md-en / edu-en / cosmo | 1.422 / 1.404 / 1.130 | 1.408 / 1.386 / 1.093 | −0.014 / −0.018 / −0.037 |
+| math / tool | 1.404 / 1.313 | 1.375 / 1.272 | −0.028 / −0.041 |
+| code / data (not in M1) | 1.672 / 1.698 | 1.687 / 1.714 | +0.015 / +0.016 |
+| books-md-de | 1.830 | 1.830 | 0.000 |
+| position eval: window, zero / carried | 1.561 / 1.533 | 1.539 / 1.506 | −0.022 / −0.027 |
+| gap closed by the carried state | 32.9% | 37.5% | +4.6 pt |
+
+- **AdamW untuned beats tuned Lion by 0.019** (seed spread ≈ 0.004), on
+  10 of 13 sources, and the carried state helps more.
+- **The gap is largest mid-run** (−0.12) and shrinks in the cosine tail:
+  Lion makes most of its progress only as the lr anneals, consistent
+  with a sign-update noise floor.
+- Lion transfers slightly better to the sources M1 lacks (code, data);
+  C2 M2/M3 will show whether that survives in-domain.
+- C2 M2–M4 continue with Lion (user decision), so the mixture ranking
+  stays internally consistent. Next, pending user decision: AdamW lr/wd
+  sweep on the winning mixture (lr 1e-3 / 4e-3, then wd 0.03 / 0.3, β2
+  0.99), then a 900 MB horizon check. Quantization cost under AdamW is
+  unmeasured (plan 001 M4/M5 were Lion-only).
