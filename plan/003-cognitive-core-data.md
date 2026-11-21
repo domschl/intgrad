@@ -174,8 +174,12 @@ exact dataset, version and license go into the manifest.
 
 **First download (C0, `ig-fetch`, 2026-11-21): 19.9 GB of parquet/JSON,**
 pinned by revision with license and sha256 in `data/raw/hf/SOURCES.jsonl`,
-archived to `~/Storage/Library/Corpora/HuggingFace`. Gated sets (xLAM,
-the Stack, StarCoder data) need a user token and are not fetched.
+archived to `~/Storage/Library/Corpora/HuggingFace`. Gated sets use the
+user's `hf` login (token never logged, dropped on CDN redirects) once their
+terms are accepted: xLAM (tool calls) and StarCoderData (about 7 GB:
+Python, C, C++, JS, TS, Rust, Go, shell, JSON, YAML, Jupyter; permissive
+licenses only, deduplicated, PII-redacted). StarCoderData is the preferred
+code source, and github-code-clean is the ungated fallback.
 
 | name | dataset (files) | license | raw |
 |---|---|---|---|

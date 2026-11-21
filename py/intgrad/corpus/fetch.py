@@ -9,8 +9,12 @@ Downloads resume (.part files) and are verified against the size the hub
 reports. Every finished file gets a line in <root>/SOURCES.jsonl:
 repo, path, revision, license, size, sha256, time. With --archive, each
 verified file (and SOURCES.jsonl) is also copied to the same relative path
-under the archive directory. Gated datasets are not
-listed here (they need a user token and accepted terms).
+under the archive directory.
+
+Gated datasets (marked gated below) need the user's Hugging Face login
+(`hf auth login`; the token is read from $HF_TOKEN or the hf token file,
+sent only to huggingface.co and never logged) and the dataset's terms
+accepted once on its web page.
 
 Nothing is uploaded and no user data is sent: the User-Agent is generic.
 """
@@ -29,7 +33,36 @@ ROOT = Path(__file__).resolve().parents[3]
 HUB = "https://huggingface.co"
 UA = {"User-Agent": "intgrad-fetch/0.1"}
 
+
+def _token() -> str | None:
+    import os
+    t = os.environ.get("HF_TOKEN")
+    if t:
+        return t.strip()
+    f = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "token"
+    return f.read_text().strip() if f.exists() else None
+
+
+_TOKEN = _token()
+
+
+class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    """Drop the token when the hub redirects to a CDN (signed URLs need none)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and not newurl.startswith(HUB + "/"):
+            new.remove_header("Authorization")
+        return new
+
+
+_OPEN = urllib.request.build_opener(_NoAuthRedirect())
+
 # name: (repo, license, [directory or file paths], max files per directory)
+# Code: StarCoderData (permissive licenses only, deduplicated, PII-redacted)
+# is preferred; github-code-clean ("code") is the ungated fallback.
+_SCD = "bigcode/starcoderdata"
+_SCD_LIC = "permissive (StarCoderData; gated)"
 SOURCES = {
     "edu-en": ("HuggingFaceFW/fineweb-edu", "odc-by", ["sample/10BT"], 2),
     "cosmo": ("HuggingFaceTB/cosmopedia", "apache-2.0",
@@ -42,12 +75,28 @@ SOURCES = {
     "tool-glaive": ("glaiveai/glaive-function-calling-v2", "apache-2.0",
                     ["glaive-function-calling-v2.json"], 0),
     "tool-hermes": ("NousResearch/hermes-function-calling-v1", "apache-2.0", [""], 0),
+    # gated (terms accepted on the web page first)
+    "tool-xlam": ("Salesforce/xlam-function-calling-60k", "cc-by-4.0; gated",
+                  ["xlam_function_calling_60k.json"], 0),
+    "scd-python": (_SCD, _SCD_LIC, ["python"], 4),
+    "scd-c": (_SCD, _SCD_LIC, ["c"], 2),
+    "scd-cpp": (_SCD, _SCD_LIC, ["cpp"], 2),
+    "scd-js": (_SCD, _SCD_LIC, ["javascript"], 2),
+    "scd-ts": (_SCD, _SCD_LIC, ["typescript"], 1),
+    "scd-rust": (_SCD, _SCD_LIC, ["rust"], 2),
+    "scd-go": (_SCD, _SCD_LIC, ["go"], 1),
+    "scd-shell": (_SCD, _SCD_LIC, ["shell"], 1),
+    "scd-json": (_SCD, _SCD_LIC, ["json"], 1),
+    "scd-yaml": (_SCD, _SCD_LIC, ["yaml"], 1),
+    "scd-jupyter": (_SCD, _SCD_LIC, ["jupyter-structured-clean-dedup"], 2),
 }
 
 
 def _get(url: str, headers: dict | None = None):
-    return urllib.request.urlopen(urllib.request.Request(url, headers={**UA, **(headers or {})}),
-                                  timeout=60)
+    h = {**UA, **(headers or {})}
+    if _TOKEN and url.startswith(HUB + "/"):
+        h["Authorization"] = f"Bearer {_TOKEN}"
+    return _OPEN.open(urllib.request.Request(url, headers=h), timeout=60)
 
 
 def revision(repo: str) -> str:
