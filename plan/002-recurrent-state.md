@@ -387,7 +387,8 @@ zero-initialised 512 × 512 W; the other seven blocks are N2b.
 - **Shelved.** Code stays (`rec_nonlin` defaults to "none", tested).
   Caveat: the expected benefit of nonlinear recurrence is state tracking
   (counting, nesting), which average bpb at 36 M parameters may not show;
-  revisit only if a state-tracking probe is added.
+  revisit only if a state-tracking probe is added. Scheduled: plan 003
+  C6 reruns it on the new mixture (code, structured data).
 
 ### N2b — WSD schedule instead of cosine (2026-11-20)
 N2b s42 with `train.sched="wsd"`, decay share 0.2, 1−√p shape (lr 7.5e-4
