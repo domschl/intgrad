@@ -1,6 +1,7 @@
 """ig-fetch — download the public plan-003 sources into data/raw/hf (§2.3).
 
-    uv run --project py ig-fetch [--only NAME ...] [--list] [--root data/raw/hf]
+    uv run --project py ig-fetch [--only NAME ...] [--list] [--open-only]
+                                 [--root data/raw/hf]
                                  [--archive ~/Storage/Library/Corpora/HuggingFace]
 
 Files come from the Hugging Face hub over plain HTTPS (no token, no hub
@@ -14,7 +15,12 @@ under the archive directory.
 Gated datasets (marked gated below) need the user's Hugging Face login
 (`hf auth login`; the token is read from $HF_TOKEN or the hf token file,
 sent only to huggingface.co and never logged) and the dataset's terms
-accepted once on its web page.
+accepted once on its web page. --open-only skips them, so the downloaded
+part of the corpus can be regenerated from ungated sources alone; builds
+can exclude them by the "gated" field in SOURCES.jsonl.
+
+DATASETS.md (repo root, acknowledgments and citations) is generated from
+this registry and the dataset cards by `ig-acknowledge`.
 
 Nothing is uploaded and no user data is sent: the User-Agent is generic.
 """
@@ -28,6 +34,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[3]
 HUB = "https://huggingface.co"
@@ -58,37 +65,44 @@ class _NoAuthRedirect(urllib.request.HTTPRedirectHandler):
 
 _OPEN = urllib.request.build_opener(_NoAuthRedirect())
 
-# name: (repo, license, [directory or file paths], max files per directory)
+class Src(NamedTuple):
+    repo: str
+    license: str
+    paths: list[str]            # directories or files under the repo
+    limit: int = 0              # max files per directory (0: all)
+    gated: bool = False         # needs accepted terms + user token
+
+
 # Code: StarCoderData (permissive licenses only, deduplicated, PII-redacted)
 # is preferred; github-code-clean ("code") is the ungated fallback.
 _SCD = "bigcode/starcoderdata"
-_SCD_LIC = "permissive (StarCoderData; gated)"
+_SCD_LIC = "permissive per file (The Stack terms of use)"
 SOURCES = {
-    "edu-en": ("HuggingFaceFW/fineweb-edu", "odc-by", ["sample/10BT"], 2),
-    "cosmo": ("HuggingFaceTB/cosmopedia", "apache-2.0",
-              ["data/khanacademy", "data/openstax", "data/stanford", "data/wikihow"], 0),
-    "cosmo-math": ("HuggingFaceTB/cosmopedia", "apache-2.0", ["data/auto_math_text"], 2),
-    "cosmo-stories": ("HuggingFaceTB/cosmopedia", "apache-2.0", ["data/stories"], 2),
-    "web-de": ("HuggingFaceFW/fineweb-2", "odc-by", ["data/deu_Latn/train"], 1),
-    "math": ("HuggingFaceTB/finemath", "odc-by", ["finemath-4plus"], 8),
-    "code": ("codeparrot/github-code-clean", "per-file (filtered to permissive)", ["data"], 8),
-    "tool-glaive": ("glaiveai/glaive-function-calling-v2", "apache-2.0",
-                    ["glaive-function-calling-v2.json"], 0),
-    "tool-hermes": ("NousResearch/hermes-function-calling-v1", "apache-2.0", [""], 0),
-    # gated (terms accepted on the web page first)
-    "tool-xlam": ("Salesforce/xlam-function-calling-60k", "cc-by-4.0; gated",
-                  ["xlam_function_calling_60k.json"], 0),
-    "scd-python": (_SCD, _SCD_LIC, ["python"], 4),
-    "scd-c": (_SCD, _SCD_LIC, ["c"], 2),
-    "scd-cpp": (_SCD, _SCD_LIC, ["cpp"], 2),
-    "scd-js": (_SCD, _SCD_LIC, ["javascript"], 2),
-    "scd-ts": (_SCD, _SCD_LIC, ["typescript"], 1),
-    "scd-rust": (_SCD, _SCD_LIC, ["rust"], 2),
-    "scd-go": (_SCD, _SCD_LIC, ["go"], 1),
-    "scd-shell": (_SCD, _SCD_LIC, ["shell"], 1),
-    "scd-json": (_SCD, _SCD_LIC, ["json"], 1),
-    "scd-yaml": (_SCD, _SCD_LIC, ["yaml"], 1),
-    "scd-jupyter": (_SCD, _SCD_LIC, ["jupyter-structured-clean-dedup"], 2),
+    "edu-en": Src("HuggingFaceFW/fineweb-edu", "ODC-By 1.0", ["sample/10BT"], 2),
+    "cosmo": Src("HuggingFaceTB/cosmopedia", "Apache-2.0",
+                 ["data/khanacademy", "data/openstax", "data/stanford", "data/wikihow"]),
+    "cosmo-math": Src("HuggingFaceTB/cosmopedia", "Apache-2.0", ["data/auto_math_text"], 2),
+    "cosmo-stories": Src("HuggingFaceTB/cosmopedia", "Apache-2.0", ["data/stories"], 2),
+    "web-de": Src("HuggingFaceFW/fineweb-2", "ODC-By 1.0", ["data/deu_Latn/train"], 1),
+    "math": Src("HuggingFaceTB/finemath", "ODC-By 1.0", ["finemath-4plus"], 8),
+    "code": Src("codeparrot/github-code-clean", "per file (kept: permissive only)", ["data"], 8),
+    "tool-glaive": Src("glaiveai/glaive-function-calling-v2", "Apache-2.0",
+                       ["glaive-function-calling-v2.json"]),
+    "tool-hermes": Src("NousResearch/hermes-function-calling-v1", "Apache-2.0", [""]),
+    # gated: terms accepted on the dataset page first; --open-only skips them
+    "tool-xlam": Src("Salesforce/xlam-function-calling-60k", "CC-BY-4.0",
+                     ["xlam_function_calling_60k.json"], gated=True),
+    "scd-python": Src(_SCD, _SCD_LIC, ["python"], 4, True),
+    "scd-c": Src(_SCD, _SCD_LIC, ["c"], 2, True),
+    "scd-cpp": Src(_SCD, _SCD_LIC, ["cpp"], 2, True),
+    "scd-js": Src(_SCD, _SCD_LIC, ["javascript"], 2, True),
+    "scd-ts": Src(_SCD, _SCD_LIC, ["typescript"], 1, True),
+    "scd-rust": Src(_SCD, _SCD_LIC, ["rust"], 2, True),
+    "scd-go": Src(_SCD, _SCD_LIC, ["go"], 1, True),
+    "scd-shell": Src(_SCD, _SCD_LIC, ["shell"], 1, True),
+    "scd-json": Src(_SCD, _SCD_LIC, ["json"], 1, True),
+    "scd-yaml": Src(_SCD, _SCD_LIC, ["yaml"], 1, True),
+    "scd-jupyter": Src(_SCD, _SCD_LIC, ["jupyter-structured-clean-dedup"], 2, True),
 }
 
 
@@ -151,6 +165,8 @@ def main():
     ap.add_argument("--only", nargs="*", choices=list(SOURCES))
     ap.add_argument("--list", action="store_true", help="show the files and sizes, download nothing")
     ap.add_argument("--archive", type=Path, help="also copy every verified file here")
+    ap.add_argument("--open-only", action="store_true",
+                    help="skip gated sources (the set anyone can re-download without accepting terms)")
     a = ap.parse_args()
     log = a.root / "SOURCES.jsonl"
     done = set()
@@ -158,7 +174,9 @@ def main():
         done = {(r["repo"], r["path"]) for r in map(json.loads, log.read_text().splitlines())}
     total = 0
     for name in a.only or SOURCES:
-        repo, lic, paths, limit = SOURCES[name]
+        repo, lic, paths, limit, gated = SOURCES[name]
+        if gated and a.open_only:
+            continue
         rev = revision(repo)
         for p in paths:
             for path, size in listing(repo, rev, p, limit):
@@ -172,7 +190,7 @@ def main():
                     sha = download(repo, rev, path, size, dest)
                     with open(log, "a") as f:
                         f.write(json.dumps({"name": name, "repo": repo, "path": path, "revision": rev,
-                                            "license": lic, "bytes": size, "sha256": sha,
+                                            "license": lic, "gated": gated, "bytes": size, "sha256": sha,
                                             "time": int(time.time())}) + "\n")
                 if a.archive:
                     arc = a.archive / repo / path

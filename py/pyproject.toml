@@ -21,6 +21,7 @@ ig-position = "intgrad.position:main"
 ig-dash = "intgrad.dash:main"
 ig-fetch = "intgrad.corpus.fetch:main"
 ig-mdbook-score = "intgrad.corpus.mdbook:main"
+ig-acknowledge = "intgrad.corpus.acknowledge:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]
