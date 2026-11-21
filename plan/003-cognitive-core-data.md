@@ -345,18 +345,77 @@ tool-use bpb come second. Close calls get a second seed.
 - Its numbers (eval-v1, eval-v2, probes, samples) are the fp reference for
   plan 002 N4.
 
-### C6 — Revisit the nonlinear recurrence (scheduled, agreed 2026-11-21)
-Plan 002 N3b was shelved: no gain on the old pool at 36 M.
+### C6 — Warm-started add-ons; revisit the nonlinear recurrence (after C2)
+Agreed 2026-11-21. New parts are added to a trained model **without
+changing its function**: the new branch's output projection into the
+residual stream starts at zero, so at step 0 the grown model computes
+exactly what the base model computed. Gradients reach the zero projection
+at once; with Lion it moves by one learning-rate step on the first
+update, so the branch does not stay stuck.
 
-Code and structured data are where nonlinear state tracking should show
-(nesting, indentation, names defined far away). So once C2 has a winner,
-rerun N3b on that mixture:
-- dense W in the middle block, as before;
-- a control: the same layer with W but no tanh;
-- scored on eval-v2 code and tool sources and on P5.
+Base: the C2 winner (N2b on the winning mixture). Protocol for every
+warm start:
+- **Control:** the base model trained on for the same steps, on the same
+  data. The grown model has already seen the base's data, so it is
+  compared with continued training, never with a model trained from
+  scratch.
+- **Schedule:** a short warmup and a cosine decay over the added steps.
+  A lower learning rate for the inherited weights is checked once, so
+  Lion does not knock them off their optimum.
+- **Scored on** eval-v2 per source, the probes (P5, P6) and ig-position.
 
-Only if that gains does the block-diagonal kernel work from plan 002 come
-back.
+Code needed: an option to start `RecMix.out` (and other new branches)
+at zero; loading a checkpoint into a grown model (matching weights
+copied, new ones fresh); a check that the grown model's outputs equal
+the base's at step 0.
+
+Runs:
+1. **C6a, recurrence on a flat model.** Flat base (the C2 mixture without
+   `rec`), recurrence inserted at zero in every block, carried-state
+   protocol. Compared with the continued flat control and with N2b
+   trained with recurrence from the start. This tells us whether a larger
+   final model can be trained flat first and get its recurrence
+   afterwards.
+2. **C6b, nonlinear recurrence (plan 002 N3b).** Shelved on the old pool
+   at 36 M. Code and structured data are where nonlinear state tracking
+   should show (nesting, indentation, names defined far away). The layer
+   runs at 62% of N2b's speed, so it is tested as a warm start:
+   - base: the C2 winner;
+   - the middle block's recurrence becomes the nonlinear one, with W and
+     the new output path at zero, so it starts as the trained linear
+     layer;
+   - control: the same insertion with W but no tanh;
+   - scored on eval-v2 code, data and tool sources and on P5.
+
+   Only if this gains does the block-diagonal kernel work from plan 002
+   come back.
+
+### C7 — Patch memory: attention over a longer history (after C6a)
+Agreed 2026-11-21, as the reusable form of the hourglass idea. Copying
+flat weights into a patch-level core is not a reuse (its inputs and
+positions change), so plan 001 M6's hourglass stays shelved.
+
+Instead, the flat model stays whole as the byte-level part (1024-byte
+windows). A small patch-level model is added beside it:
+- it reads a longer history, the 4–8 kB before the window, in patches of
+  k bytes;
+- its output enters a middle block through a zero-initialised projection
+  (cross-attention or an additive summary), so step 0 is the flat model.
+
+It is a second cross-window memory: a full attention view of the recent
+past, where the recurrence keeps a compressed state. Compared on the same
+base and warm-start protocol as C6:
+
+| run | cross-window memory |
+|---|---|
+| flat, continued | none |
+| C6a | recurrence |
+| C7 | patch memory |
+| C7 + recurrence | both |
+
+Scored on eval-v2, the carried and cold windows of ig-position, and the
+cost (speed, memory). New code (the patch model and its injection); it
+runs only after C6a has validated the warm-start protocol.
 
 ## 5. Decisions (plan 003)
 
